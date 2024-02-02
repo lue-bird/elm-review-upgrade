@@ -22,7 +22,7 @@ config =
         [ Upgrade.name { old = ( "Fuzz", "tuple" ), new = ( "Fuzz", "pair" ) }
         , Upgrade.toPipeline
             { oldName = ( "Expect", "true" )
-            , oldArgumentDefaultNames = [ "onFalseDescription" ]
+            , oldArgumentNames = [ "onFalseDescription" ]
             , oldArgumentsToNew =
                 \oldArguments ->
                     case oldArguments of

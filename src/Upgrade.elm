@@ -107,7 +107,7 @@ as an [`Upgrade.call`](#call):
 
     Upgrade.call
         { oldName = ( "Expect", "true" )
-        , oldArgumentDefaultNames = [ "onFalseDescription", "actualBool" ]
+        , oldArgumentNames = [ "onFalseDescription", "actualBool" ]
         , oldArgumentsToNew =
             \oldArguments ->
                 case oldArguments of
@@ -138,7 +138,7 @@ as an [`Upgrade.call`](#call):
 
     Upgrade.call
         { oldName = ( "Array.Extra", "apply" )
-        , oldArgumentDefaultNames = [ "functions", "arguments" ]
+        , oldArgumentNames = [ "functions", "arguments" ]
         , oldArgumentsToNew =
             \oldArguments ->
                 case oldArguments of
