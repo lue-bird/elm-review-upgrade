@@ -1,6 +1,6 @@
 module Upgrade exposing
     ( rule
-    , Upgrade, UpgradeSingle, reference, application
+    , Upgrade, UpgradeSingle, reference, application, batch
     , call, pipeInto
     )
 
@@ -29,17 +29,8 @@ module Upgrade exposing
         ]
 
 @docs rule
-@docs Upgrade, UpgradeSingle, reference, application
+@docs Upgrade, UpgradeSingle, reference, application, batch
 @docs call, pipeInto
-
-
-## Try it out
-
-You can try this rule out by running the following command:
-
-```bash
-elm-review --template jfmengels/elm-review-upgrade/example --rules Upgrade
-```
 
 -}
 
@@ -252,6 +243,38 @@ pipeInto qualifiedName argumentsExceptTheLastOne =
         pipelineSoFar
             |> ListFilled.attach
                 [ { name = qualifiedName, arguments = argumentsExceptTheLastOne } ]
+
+
+{-| Group multiple individual [`Upgrade`](#Upgrade)s as one [`Upgrade`](#Upgrade).
+
+    Upgrade.rule
+        [ testVersion1To2
+        , elmCommunityExtraToElmcraftCoreExtra
+        , myInternalAPIChange
+        ]
+
+    testVersion1To2 : Upgrade
+    testVersion1To2 =
+        Upgrade.batch
+            [ Upgrade.reference { old = ( "Fuzz", "tuple" ), new = ( "Fuzz", "pair" ) }
+            , Upgrade.reference { old = ( "Fuzz", "tuple3" ), new = ( "Fuzz", "triple" ) }
+            , ..etc..
+            ]
+
+    elmCommunityExtraToElmcraftCoreExtra : Upgrade
+    elmCommunityExtraToElmcraftCoreExtra =
+        Upgrade.batch [ ... ]
+
+    myInternalAPIChange : Upgrade
+    myInternalAPIChange =
+        Upgrade.batch [ ... ]
+
+Helps keep the upgrades a bit more tidy, less `List.concat`s and such.
+
+-}
+batch : List Upgrade -> Upgrade
+batch =
+    \upgradeList -> upgradeList |> Rope.fromList |> Rope.concat
 
 
 type alias ModuleContext =
