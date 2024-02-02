@@ -20,7 +20,7 @@ config : List Review.Rule.Rule
 config =
     [ Upgrade.rule
         [ Upgrade.name { old = ( "Fuzz", "tuple" ), new = ( "Fuzz", "pair" ) }
-        , Upgrade.toPipeline
+        , Upgrade.application
             { oldName = ( "Expect", "true" )
             , oldArgumentNames = [ "onFalseDescription" ]
             , oldArgumentsToNew =
@@ -28,7 +28,7 @@ config =
                     case oldArguments of
                         [ descriptionArgument ] ->
                             Upgrade.call ( "Expect", "equals" )
-                                [ Elm.Syntax.Expression.FunctionOrValue [ "Bool" ] "True" ]
+                                [ Elm.Syntax.Expression.FunctionOrValue [ "Basics" ] "True" ]
                                 |> Upgrade.pipeInto ( "Expect", "onFail" )
                                     [ descriptionArgument ]
                                 |> Just

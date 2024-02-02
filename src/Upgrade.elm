@@ -1,7 +1,7 @@
 module Upgrade exposing
     ( rule
-    , Upgrade, UpgradeSingle, name, call
-    , apply, pipeInto
+    , Upgrade, UpgradeSingle, name, application
+    , call, pipeInto
     )
 
 {-| Reports when an expression can be simplified.
@@ -15,8 +15,8 @@ module Upgrade exposing
         ]
 
 @docs rule
-@docs Upgrade, UpgradeSingle, name, call
-@docs apply, pipeInto
+@docs Upgrade, UpgradeSingle, name, application
+@docs call, pipeInto
 
 
 ## Try it out
@@ -62,7 +62,7 @@ type alias Upgrade =
 {-| An upgrade for a single function/value. A bunch of them are one [`Upgrade`](#Upgrade)
 -}
 type UpgradeSingle
-    = CallToPipeline
+    = Application
         { oldName : ( String, String )
         , oldDefaultArgumentNames : List String
         , oldArgumentsToNew :
@@ -88,24 +88,25 @@ For example to replace every `MyUtil.findMap` with `List.Extra.findMap`:
 -}
 name : { old : ( String, String ), new : ( String, String ) } -> Upgrade
 name nameChange =
-    call
+    application
         { oldName = nameChange.old
         , oldDefaultArgumentNames = []
         , oldArgumentsToNew =
-            \oldArguments -> Just (apply nameChange.new oldArguments)
+            \oldArguments -> Just (call nameChange.new oldArguments)
         }
 
 
-{-| Flexible [`Upgrade`](#Upgrade) for a call to a [pipeline](#pipeInto) or an [application](#apply).
+{-| Flexible [`Upgrade`](#Upgrade) for a transformation from usage of a given function/value reference
+to a [pipeline](#pipeInto) or a [call](#call).
 
 For example to do describe the transformation
 
     Expect.true onFalseDescription actualBool
     --> Expect.equal True actualBool |> Expect.onFail onFalseDescription
 
-as an [`Upgrade.call`](#call):
+as an [`Upgrade.application`](#application):
 
-    Upgrade.call
+    Upgrade.application
         { oldName = ( "Expect", "true" )
         , oldArgumentNames = [ "onFalseDescription", "actualBool" ]
         , oldArgumentsToNew =
@@ -131,13 +132,13 @@ as an [`Upgrade.call`](#call):
 
 Here's another example to change
 
-    Array.Extra.apply funs arguments
+    Array.Extra.call funs arguments
     --> Array.Extra.andMap arguments funs
 
-as an [`Upgrade.call`](#call):
+as an [`Upgrade.application`](#application):
 
-    Upgrade.call
-        { oldName = ( "Array.Extra", "apply" )
+    Upgrade.application
+        { oldName = ( "Array.Extra", "call" )
         , oldArgumentNames = [ "functions", "arguments" ]
         , oldArgumentsToNew =
             \oldArguments ->
@@ -152,7 +153,7 @@ as an [`Upgrade.call`](#call):
         }
 
 -}
-call :
+application :
     { oldName : ( String, String )
     , oldDefaultArgumentNames : List String
     , oldArgumentsToNew :
@@ -169,14 +170,14 @@ call :
                 )
     }
     -> Upgrade
-call config =
-    Rope.singleton (CallToPipeline config)
+application config =
+    Rope.singleton (Application config)
 
 
-{-| Construct an application as the transformed value of a [`call`](Upgrade#call).
+{-| Construct an application as the transformed replacement value of an [`Upgrade.application`](Upgrade#application).
 Use [`pipeInto`](#pipeInto) if you want to use its result as the input of a pipeline.
 -}
-apply :
+call :
     ( String, String )
     -> List Expression
     ->
@@ -188,7 +189,7 @@ apply :
             , arguments : List Expression
             }
         )
-apply qualifiedName arguments =
+call qualifiedName arguments =
     ( { name = qualifiedName, arguments = arguments }, [] )
 
 
@@ -199,7 +200,7 @@ For example to get
 
 →
 
-    Upgrade.apply ( "List", "map" ) [ mapperArgument ]
+    Upgrade.call ( "List", "map" ) [ mapperArgument ]
         |> Upgrade.pipeInto ( "List", "reverse" ) []
 
 -}
@@ -489,8 +490,8 @@ expressionVisitor upgrade context =
                 upgradePerformed :
                     Maybe
                         { name : ( String, String )
-                        , nameRange : Range
-                        , callRange : Range
+                        , referenceRange : Range
+                        , range : Range
                         , replacement : String
                         , replacementDescription : String
                         , usedModules : Set String
@@ -514,9 +515,9 @@ expressionVisitor upgrade context =
                                 [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
                                 ]
                             }
-                            successfulUpgrade.nameRange
+                            successfulUpgrade.referenceRange
                             [ Review.Fix.replaceRangeBy
-                                successfulUpgrade.callRange
+                                successfulUpgrade.range
                                 successfulUpgrade.replacement
                             , let
                                 modulesToImport : Set String
@@ -533,7 +534,7 @@ expressionVisitor upgrade context =
                             ]
                       ]
                     , { contextWithInferredConstantsAndLocalBindings
-                        | rangesToIgnore = context.rangesToIgnore |> RangeDict.insert successfulUpgrade.callRange ()
+                        | rangesToIgnore = context.rangesToIgnore |> RangeDict.insert successfulUpgrade.range ()
                       }
                     )
 
@@ -860,8 +861,8 @@ expressionUpgradePerform :
          ->
             Maybe
                 { name : ( String, String )
-                , nameRange : Range
-                , callRange : Range
+                , referenceRange : Range
+                , range : Range
                 , replacement : String
                 , replacementDescription : String
                 , usedModules : Set String
@@ -869,17 +870,17 @@ expressionUpgradePerform :
         )
 expressionUpgradePerform upgrade context =
     \expressionNode ->
-        case expressionNode |> toReferenceOrCall of
+        case expressionNode |> toReferenceOrApplication of
             Nothing ->
                 Nothing
 
-            Just valueOrFunctionOrCall ->
-                case Review.ModuleNameLookupTable.moduleNameAt context.lookupTable valueOrFunctionOrCall.nameRange of
+            Just referenceOrApplication ->
+                case Review.ModuleNameLookupTable.moduleNameAt context.lookupTable referenceOrApplication.referenceRange of
                     Nothing ->
                         Nothing
 
                     Just moduleName ->
-                        case Dict.get ( moduleName |> fromSyntaxModuleName, valueOrFunctionOrCall.name ) upgrade of
+                        case Dict.get ( moduleName |> fromSyntaxModuleName, referenceOrApplication.name ) upgrade of
                             Nothing ->
                                 Nothing
 
@@ -887,11 +888,10 @@ expressionUpgradePerform upgrade context =
                                 let
                                     range : Range
                                     range =
-                                        case List.drop (upgradeForName.oldArgumentCount - 1) valueOrFunctionOrCall.arguments of
+                                        case List.drop (upgradeForName.oldArgumentCount - 1) referenceOrApplication.arguments of
                                             lastExpectedArg :: _ :: _ ->
-                                                -- Too many arguments!
-                                                -- We'll update the range to drop the extra ones and force the call style to application
-                                                { start = valueOrFunctionOrCall.nameRange.start, end = (Elm.Syntax.Node.range lastExpectedArg).end }
+                                                -- extra arguments so we'll update the range to drop the extra ones
+                                                { start = referenceOrApplication.referenceRange.start, end = (Elm.Syntax.Node.range lastExpectedArg).end }
 
                                             _ ->
                                                 expressionNode |> Elm.Syntax.Node.range
@@ -899,7 +899,7 @@ expressionUpgradePerform upgrade context =
                                     arguments : List (Node Expression)
                                     arguments =
                                         -- drop the extra arguments
-                                        List.take (upgradeForName.oldArgumentCount - 1) valueOrFunctionOrCall.arguments
+                                        List.take (upgradeForName.oldArgumentCount - 1) referenceOrApplication.arguments
 
                                     upgradeResources : UpgradeResources
                                     upgradeResources =
@@ -909,16 +909,16 @@ expressionUpgradePerform upgrade context =
                                         , moduleBindings = context.moduleBindings
                                         , localBindings = context.localBindings
                                         , range = range
-                                        , nameRange = valueOrFunctionOrCall.nameRange
+                                        , referenceRange = referenceOrApplication.referenceRange
                                         , arguments = arguments
                                         }
                                 in
                                 upgradeForName.toNew upgradeResources
                                     |> Maybe.map
                                         (\replacement ->
-                                            { name = ( moduleName |> fromSyntaxModuleName, valueOrFunctionOrCall.name )
-                                            , nameRange = valueOrFunctionOrCall.nameRange
-                                            , callRange = range
+                                            { name = ( moduleName |> fromSyntaxModuleName, referenceOrApplication.name )
+                                            , referenceRange = referenceOrApplication.referenceRange
+                                            , range = range
                                             , replacement = replacement.replacement
                                             , replacementDescription = replacement.replacementDescription
                                             , usedModules = replacement.usedModules
@@ -973,15 +973,15 @@ upgradeSingleReplacement :
 upgradeSingleReplacement =
     \upgradeSingle ->
         case upgradeSingle of
-            CallToPipeline callToPipeline ->
-                { oldName = callToPipeline.oldName
-                , oldArgumentCount = callToPipeline.oldDefaultArgumentNames |> List.length
+            Application applicationUpgrade ->
+                { oldName = applicationUpgrade.oldName
+                , oldArgumentCount = applicationUpgrade.oldDefaultArgumentNames |> List.length
                 , toNew =
                     \upgradeInfo ->
                         let
                             missingArgumentNames : List String
                             missingArgumentNames =
-                                callToPipeline.oldDefaultArgumentNames
+                                applicationUpgrade.oldDefaultArgumentNames
                                     |> List.drop (upgradeInfo.arguments |> List.length)
                                     |> List.map (\missingArgument -> missingArgument |> disambiguateFromBindingsInScope upgradeInfo)
 
@@ -990,7 +990,7 @@ upgradeSingleReplacement =
                                 (upgradeInfo.arguments |> List.map Elm.Syntax.Node.value)
                                     ++ (missingArgumentNames |> List.map (\arg -> Elm.Syntax.Expression.FunctionOrValue [] arg))
                         in
-                        case oldArguments |> callToPipeline.oldArgumentsToNew of
+                        case oldArguments |> applicationUpgrade.oldArgumentsToNew of
                             Nothing ->
                                 Nothing
 
@@ -1000,7 +1000,7 @@ upgradeSingleReplacement =
                                     usedModules =
                                         newPipeline
                                             |> listFilledToList
-                                            |> List.concatMap (\application -> application.arguments)
+                                            |> List.concatMap (\inPipeline -> inPipeline.arguments)
                                             |> List.foldl (\arg soFar -> Set.union soFar (arg |> expressionUsedModules))
                                                 (newPipeline
                                                     |> listFilledToList
@@ -1179,7 +1179,7 @@ type alias UpgradeResources =
     , moduleBindings : Set String
     , localBindings : RangeDict (Set String)
     , range : Range
-    , nameRange : Range
+    , referenceRange : Range
     , arguments : List (Node Expression)
     }
 
@@ -1515,37 +1515,37 @@ expressionMap expressionChange =
 {-| Parses either a value reference
 or a function reference with or without arguments.
 -}
-toReferenceOrCall :
+toReferenceOrApplication :
     Node Expression
     ->
         Maybe
             { range : Range
             , name : String
-            , nameRange : Range
+            , referenceRange : Range
             , arguments : List (Node Expression)
             }
-toReferenceOrCall baseNode =
+toReferenceOrApplication baseNode =
     let
         step :
             { arguments : ListFilled (Node Expression), fed : Node Expression }
-            -> Maybe { range : Range, nameRange : Range, name : String, arguments : List (Node Expression) }
+            -> Maybe { range : Range, referenceRange : Range, name : String, arguments : List (Node Expression) }
         step layer =
             layer.fed
-                |> toReferenceOrCall
+                |> toReferenceOrApplication
                 |> Maybe.map
                     (\fed ->
                         { range = baseNode |> Elm.Syntax.Node.range
-                        , nameRange = fed.nameRange
+                        , referenceRange = fed.referenceRange
                         , name = fed.name
                         , arguments = fed.arguments ++ (layer.arguments |> listFilledToList)
                         }
                     )
     in
     case baseNode |> removeParens of
-        Node nameRange (Elm.Syntax.Expression.FunctionOrValue _ unqualifiedName) ->
+        Node referenceRange (Elm.Syntax.Expression.FunctionOrValue _ unqualifiedName) ->
             Just
                 { range = Elm.Syntax.Node.range baseNode
-                , nameRange = nameRange
+                , referenceRange = referenceRange
                 , name = unqualifiedName
                 , arguments = []
                 }
