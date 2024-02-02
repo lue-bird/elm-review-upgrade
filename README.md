@@ -27,7 +27,7 @@ config =
                 \oldArguments ->
                     case oldArguments of
                         [ onFalse, actual ] ->
-                            Upgrade.call ( "Expect", "equals" )
+                            Upgrade.call ( "Expect", "equal" )
                                 [ Elm.CodeGen.fqVal [ "Basics" ] "True", actual ]
                                 |> Upgrade.pipeInto ( "Expect", "onFail" ) [ onFalse ]
                                 |> Just
