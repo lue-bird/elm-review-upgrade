@@ -1,0 +1,1645 @@
+module Upgrade exposing
+    ( rule
+    , Upgrade, UpgradeSingle, name, call
+    , apply, pipeInto
+    )
+
+{-| Reports when an expression can be simplified.
+
+🔧 Running with `--fix` will automatically remove all the reported errors.
+
+    config =
+        [ Upgrade.rule
+            [ Upgrade.name { old = ( "MyUtil", "findMap" ), new = ( "List.Extra", "findMap" ) }
+            ]
+        ]
+
+@docs rule
+@docs Upgrade, UpgradeSingle, name, call
+@docs apply, pipeInto
+
+
+## Try it out
+
+You can try this rule out by running the following command:
+
+```bash
+elm-review --template jfmengels/elm-review-upgrade/example --rules Upgrade
+```
+
+-}
+
+import Dict exposing (Dict)
+import Elm.CodeGen
+import Elm.Pretty
+import Elm.Syntax.Declaration exposing (Declaration)
+import Elm.Syntax.Exposing
+import Elm.Syntax.Expression exposing (Expression)
+import Elm.Syntax.Import exposing (Import)
+import Elm.Syntax.ModuleName
+import Elm.Syntax.Node exposing (Node(..))
+import Elm.Syntax.Pattern exposing (Pattern)
+import Elm.Syntax.Range exposing (Range)
+import Pretty
+import RangeDict exposing (RangeDict)
+import Review.Fix
+import Review.ModuleNameLookupTable exposing (ModuleNameLookupTable)
+import Review.Rule exposing (Error, Rule)
+import Rope exposing (Rope)
+import Set exposing (Set)
+
+
+
+-- upgrade
+
+
+{-| A bunch of [`UpgradeSingle`](#UpgradeSingle)s to transform your code
+-}
+type alias Upgrade =
+    Rope UpgradeSingle
+
+
+{-| An upgrade for a single function/value. A bunch of them are one [`Upgrade`](#Upgrade)
+-}
+type UpgradeSingle
+    = CallToPipeline
+        { oldName : ( String, String )
+        , oldDefaultArgumentNames : List String
+        , oldArgumentsToNew :
+            List Expression
+            ->
+                Maybe
+                    ( { name : ( String, String )
+                      , arguments : List Expression
+                      }
+                    , List
+                        { name : ( String, String )
+                        , arguments : List Expression
+                        }
+                    )
+        }
+
+
+{-| [`Upgrade`](#Upgrade) only the name.
+For example to replace every `MyUtil.findMap` with `List.Extra.findMap`:
+
+    Upgrade.name { old = "MyUtil", "findMap" ), new = ( "List.Extra", "findMap" ) }
+
+-}
+name : { old : ( String, String ), new : ( String, String ) } -> Upgrade
+name nameChange =
+    call
+        { oldName = nameChange.old
+        , oldDefaultArgumentNames = []
+        , oldArgumentsToNew =
+            \oldArguments -> Just (apply nameChange.new oldArguments)
+        }
+
+
+{-| Flexible [`Upgrade`](#Upgrade) for a call to a [pipeline](#pipeInto) or an [application](#apply).
+
+For example to do describe the transformation
+
+    Expect.true onFalseDescription actualBool
+    --> Expect.equal True actualBool |> Expect.onFail onFalseDescription
+
+as an [`Upgrade.call`](#call):
+
+    Upgrade.call
+        { oldName = ( "Expect", "true" )
+        , oldArgumentDefaultNames = [ "onFalseDescription", "actualBool" ]
+        , oldArgumentsToNew =
+            \oldArguments ->
+                case oldArguments of
+                    [ onFalseDescriptionArgument, boolArgument ] ->
+                        Upgrade.application
+                            { name = ( "Expect", "equal" )
+                            , arguments =
+                                [ Elm.Syntax.Expression.FunctionOrValue [ "Basics" ] "True"
+                                , boolArgument
+                                ]
+                            }
+                            |> Upgrade.pipeInto
+                                { name = ( "Expect", "onFail" )
+                                , arguments = [ onFalseDescriptionArgument ]
+                                }
+                            |> Just
+
+                    _ ->
+                        Nothing
+        }
+
+Here's another example to change
+
+    Array.Extra.apply funs arguments
+    --> Array.Extra.andMap arguments funs
+
+as an [`Upgrade.call`](#call):
+
+    Upgrade.call
+        { oldName = ( "Array.Extra", "apply" )
+        , oldArgumentDefaultNames = [ "functions", "arguments" ]
+        , oldArgumentsToNew =
+            \oldArguments ->
+                case oldArguments of
+                    [ functionsArgument, argumentsArgument ] ->
+                        Upgrade.application ( "Array.Extra", "andMap" )
+                            [ argumentsArgument, functionsArgument ]
+                            |> Just
+
+                    _ ->
+                        Nothing
+        }
+
+-}
+call :
+    { oldName : ( String, String )
+    , oldDefaultArgumentNames : List String
+    , oldArgumentsToNew :
+        List Expression
+        ->
+            Maybe
+                ( { name : ( String, String )
+                  , arguments : List Expression
+                  }
+                , List
+                    { name : ( String, String )
+                    , arguments : List Expression
+                    }
+                )
+    }
+    -> Upgrade
+call config =
+    Rope.singleton (CallToPipeline config)
+
+
+{-| Construct an application as the transformed value of a [`call`](Upgrade#call).
+Use [`pipeInto`](#pipeInto) if you want to use its result as the input of a pipeline.
+-}
+apply :
+    ( String, String )
+    -> List Expression
+    ->
+        ( { name : ( String, String )
+          , arguments : List Expression
+          }
+        , List
+            { name : ( String, String )
+            , arguments : List Expression
+            }
+        )
+apply qualifiedName arguments =
+    ( { name = qualifiedName, arguments = arguments }, [] )
+
+
+{-| Extend the transformed value by `|> anotherFunction plus arguments`.
+For example to get
+
+    List.map mapper |> List.reverse
+
+→
+
+    Upgrade.apply ( "List", "map" ) [ mapperArgument ]
+        |> Upgrade.pipeInto ( "List", "reverse" ) []
+
+-}
+pipeInto :
+    ( String, String )
+    -> List Expression
+    ->
+        (( { name : ( String, String )
+           , arguments : List Expression
+           }
+         , List
+            { name : ( String, String )
+            , arguments : List Expression
+            }
+         )
+         ->
+            ( { name : ( String, String )
+              , arguments : List Expression
+              }
+            , List
+                { name : ( String, String )
+                , arguments : List Expression
+                }
+            )
+        )
+pipeInto qualifiedName argumentsExceptTheLastOne =
+    \pipelineSoFar ->
+        pipelineSoFar
+            |> listFilledAttach
+                [ { name = qualifiedName, arguments = argumentsExceptTheLastOne } ]
+
+
+
+-- rule
+
+
+{-| Rule to upgrade Elm code.
+-}
+rule : List Upgrade -> Rule
+rule upgrades =
+    let
+        upgradeReplacementsByOldName :
+            Dict
+                ( String, String )
+                { oldArgumentCount : Int
+                , toNew :
+                    UpgradeResources
+                    -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
+                }
+        upgradeReplacementsByOldName =
+            upgrades
+                |> Rope.fromList
+                |> Rope.concat
+                |> upgradeReplacements
+    in
+    Review.Rule.newModuleRuleSchemaUsingContextCreator "Upgrade" initialContext
+        |> Review.Rule.providesFixesForModuleRule
+        |> Review.Rule.withCommentsVisitor
+            (\comments context ->
+                case comments |> listFirstJustMap (commentToModuleCommentRange context) of
+                    Just moduleCommentRange ->
+                        ( []
+                        , { context | importRow = moduleCommentRange.end.row + 1 }
+                        )
+
+                    Nothing ->
+                        ( [], context )
+            )
+        |> Review.Rule.withDeclarationListVisitor (\decls context -> ( [], declarationListVisitor decls context ))
+        |> Review.Rule.withDeclarationEnterVisitor (\node context -> ( [], declarationVisitor node context ))
+        |> Review.Rule.withExpressionEnterVisitor
+            (\expressionNode context ->
+                expressionNode |> expressionVisitor upgradeReplacementsByOldName context
+            )
+        |> Review.Rule.withExpressionExitVisitor (\node context -> ( [], expressionExitVisitor node context ))
+        |> Review.Rule.fromModuleRuleSchema
+
+
+commentToModuleCommentRange : { resources_ | extractSourceCode : Range -> String } -> (Node String -> Maybe Range)
+commentToModuleCommentRange resources =
+    \(Node commentRange comment) ->
+        if comment |> String.startsWith "{-|" then
+            case
+                { start = { row = commentRange.end.row + 1, column = 1 }
+                , end = { row = commentRange.end.row + 1, column = 4 }
+                }
+                    |> resources.extractSourceCode
+            of
+                "port" ->
+                    Nothing
+
+                _ ->
+                    Just commentRange
+
+        else
+            Nothing
+
+
+type alias ModuleContext =
+    { lookupTable : ModuleNameLookupTable
+    , moduleName : String
+    , moduleBindings : Set String
+    , localBindings : RangeDict (Set String)
+    , branchLocalBindings : RangeDict (Set String)
+    , rangesToIgnore : RangeDict ()
+    , extractSourceCode : Range -> String
+    , importLookup : ImportLookup
+    , importRow : Int
+    }
+
+
+type alias ImportLookup =
+    Dict
+        String
+        { alias : Maybe String
+        , exposed : Exposed -- includes names of found variants
+        }
+
+
+type alias QualifyResources a =
+    { a
+        | importLookup : ImportLookup
+        , moduleBindings : Set String
+        , localBindings : RangeDict (Set String)
+    }
+
+
+initialContext : Review.Rule.ContextCreator () ModuleContext
+initialContext =
+    Review.Rule.initContextCreator
+        (\lookupTable moduleName extractSourceCode fullAst () ->
+            { lookupTable = lookupTable
+            , moduleName = moduleName |> fromSyntaxModuleName
+            , importLookup =
+                List.foldl
+                    (\(Node _ import_) importLookup ->
+                        let
+                            importInfo : { moduleName : String, exposed : Exposed, alias : Maybe String }
+                            importInfo =
+                                importContext import_
+                        in
+                        insertImport importInfo.moduleName { alias = importInfo.alias, exposed = importInfo.exposed } importLookup
+                    )
+                    implicitImports
+                    fullAst.imports
+            , moduleBindings = Set.empty
+            , localBindings = RangeDict.empty
+            , branchLocalBindings = RangeDict.empty
+            , rangesToIgnore = RangeDict.empty
+            , extractSourceCode = extractSourceCode
+            , importRow = 2
+            }
+        )
+        |> Review.Rule.withModuleNameLookupTable
+        |> Review.Rule.withModuleName
+        |> Review.Rule.withSourceCodeExtractor
+        |> Review.Rule.withFullAst
+
+
+type Exposed
+    = ExposedAll
+    | ExposedSome (Set String)
+
+
+importContext : Import -> { moduleName : String, exposed : Exposed, alias : Maybe String }
+importContext import_ =
+    { moduleName = import_.moduleName |> Elm.Syntax.Node.value |> fromSyntaxModuleName
+    , alias = import_.moduleAlias |> Maybe.map (\(Node _ parts) -> parts |> fromSyntaxModuleName)
+    , exposed =
+        case import_.exposingList of
+            Nothing ->
+                ExposedSome Set.empty
+
+            Just (Node _ existingExposing) ->
+                case existingExposing of
+                    Elm.Syntax.Exposing.All _ ->
+                        ExposedAll
+
+                    Elm.Syntax.Exposing.Explicit exposes ->
+                        ExposedSome
+                            (exposes
+                                |> List.map (\(Node _ expose) -> expose |> exposeName)
+                                |> Set.fromList
+                            )
+    }
+
+
+exposeName : Elm.Syntax.Exposing.TopLevelExpose -> String
+exposeName topLevelExpose =
+    case topLevelExpose of
+        Elm.Syntax.Exposing.FunctionExpose exposeValueReferenceName ->
+            exposeValueReferenceName
+
+        Elm.Syntax.Exposing.TypeOrAliasExpose typeName ->
+            typeName
+
+        Elm.Syntax.Exposing.InfixExpose symbol ->
+            symbol
+
+        Elm.Syntax.Exposing.TypeExpose typeExpose ->
+            typeExpose.name
+
+
+declarationListVisitor : List (Node Declaration) -> ModuleContext -> ModuleContext
+declarationListVisitor declarationList context =
+    { context
+        | moduleBindings = declarationList |> declarationListBindings
+    }
+
+
+declarationVisitor : Node Declaration -> ModuleContext -> ModuleContext
+declarationVisitor declarationNode context =
+    case Elm.Syntax.Node.value declarationNode of
+        Elm.Syntax.Declaration.FunctionDeclaration functionDeclaration ->
+            { context
+                | rangesToIgnore = RangeDict.empty
+                , localBindings =
+                    RangeDict.singleton
+                        (functionDeclaration.declaration |> Elm.Syntax.Node.range)
+                        (patternListBindings (functionDeclaration.declaration |> Elm.Syntax.Node.value).arguments)
+            }
+
+        _ ->
+            context
+
+
+
+-- EXPRESSION VISITOR
+
+
+expressionVisitor :
+    Dict
+        ( String, String )
+        { oldArgumentCount : Int
+        , toNew :
+            UpgradeResources
+            -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
+        }
+    -> ModuleContext
+    ->
+        (Node Expression
+         -> ( List (Error {}), ModuleContext )
+        )
+expressionVisitor upgrade context =
+    \expressionNode ->
+        let
+            expressionRange : Range
+            expressionRange =
+                expressionNode |> Elm.Syntax.Node.range
+        in
+        if RangeDict.member expressionRange context.rangesToIgnore then
+            ( [], context )
+
+        else
+            let
+                expression : Expression
+                expression =
+                    expressionNode |> Elm.Syntax.Node.value
+
+                withExpressionSurfaceBindings : RangeDict (Set String)
+                withExpressionSurfaceBindings =
+                    RangeDict.insert expressionRange (expressionSurfaceBindings expression) context.localBindings
+
+                withNewBranchLocalBindings : RangeDict (Set String)
+                withNewBranchLocalBindings =
+                    RangeDict.union (expressionBranchLocalBindings expression)
+                        context.branchLocalBindings
+
+                contextWithInferredConstantsAndLocalBindings : ModuleContext
+                contextWithInferredConstantsAndLocalBindings =
+                    case RangeDict.get expressionRange context.branchLocalBindings of
+                        Nothing ->
+                            { context
+                                | localBindings = withExpressionSurfaceBindings
+                                , branchLocalBindings =
+                                    withNewBranchLocalBindings
+                            }
+
+                        Just currentBranchLocalBindings ->
+                            { context
+                                | localBindings =
+                                    RangeDict.insert expressionRange currentBranchLocalBindings withExpressionSurfaceBindings
+                                , branchLocalBindings =
+                                    RangeDict.remove expressionRange withNewBranchLocalBindings
+                            }
+
+                upgradePerformed :
+                    Maybe
+                        { name : ( String, String )
+                        , nameRange : Range
+                        , callRange : Range
+                        , replacement : String
+                        , replacementDescription : String
+                        , usedModules : Set String
+                        }
+                upgradePerformed =
+                    expressionNode |> expressionUpgradePerform upgrade contextWithInferredConstantsAndLocalBindings
+            in
+            case upgradePerformed of
+                Nothing ->
+                    ( [], contextWithInferredConstantsAndLocalBindings )
+
+                Just successfulUpgrade ->
+                    ( [ Review.Rule.errorWithFix
+                            { message =
+                                [ qualifiedToString (qualify successfulUpgrade.name defaultQualifyResources)
+                                , " can be upgraded to "
+                                , successfulUpgrade.replacementDescription
+                                ]
+                                    |> String.concat
+                            , details =
+                                [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
+                                ]
+                            }
+                            successfulUpgrade.nameRange
+                            [ Review.Fix.replaceRangeBy
+                                successfulUpgrade.callRange
+                                successfulUpgrade.replacement
+                            , let
+                                modulesToImport : Set String
+                                modulesToImport =
+                                    Set.diff successfulUpgrade.usedModules
+                                        (context.importLookup |> Dict.keys |> Set.fromList)
+                              in
+                              Review.Fix.insertAt { row = context.importRow, column = 1 }
+                                (modulesToImport
+                                    |> Set.toList
+                                    |> List.concatMap (\moduleName -> [ "import ", moduleName, "\n" ])
+                                    |> String.concat
+                                )
+                            ]
+                      ]
+                    , { contextWithInferredConstantsAndLocalBindings
+                        | rangesToIgnore = context.rangesToIgnore |> RangeDict.insert successfulUpgrade.callRange ()
+                      }
+                    )
+
+
+defaultQualifyResources : QualifyResources {}
+defaultQualifyResources =
+    { importLookup = implicitImports
+    , localBindings = RangeDict.empty
+    , moduleBindings = Set.empty
+    }
+
+
+{-| From the `elm/core` readme:
+
+>
+> ### Default Imports
+
+> The modules in this package are so common, that some of them are imported by default in all Elm files. So it is as if every Elm file starts with these imports:
+>
+>     import Basics exposing (..)
+>     import List exposing (List, (::))
+>     import Maybe exposing (Maybe(..))
+>     import Result exposing (Result(..))
+>     import String exposing (String)
+>     import Char exposing (Char)
+>     import Tuple
+>     import Debug
+>     import Platform exposing (Program)
+>     import Platform.Cmd as Cmd exposing (Cmd)
+>     import Platform.Sub as Sub exposing (Sub)
+
+-}
+implicitImports : ImportLookup
+implicitImports =
+    [ ( "Basics", { alias = Nothing, exposed = ExposedAll } )
+    , ( "List", { alias = Nothing, exposed = ExposedSome (Set.fromList [ "List", "(::)" ]) } )
+    , ( "Maybe", { alias = Nothing, exposed = ExposedSome (Set.fromList [ "Maybe", "Just", "Nothing" ]) } )
+    , ( "Result", { alias = Nothing, exposed = ExposedSome (Set.fromList [ "Result", "Ok", "Err" ]) } )
+    , ( "String", { alias = Nothing, exposed = ExposedSome (Set.singleton "String") } )
+    , ( "Char", { alias = Nothing, exposed = ExposedSome (Set.singleton "Char") } )
+    , ( "Tuple", { alias = Nothing, exposed = ExposedSome Set.empty } )
+    , ( "Debug", { alias = Nothing, exposed = ExposedSome Set.empty } )
+    , ( "Platform", { alias = Nothing, exposed = ExposedSome (Set.singleton "Program") } )
+    , ( "Platform.Cmd", { alias = Just "Cmd", exposed = ExposedSome (Set.singleton "Cmd") } )
+    , ( "Platform.Sub", { alias = Just "Sub", exposed = ExposedSome (Set.singleton "Sub") } )
+    ]
+        |> Dict.fromList
+
+
+{-| Merge a given new import with an existing import lookup.
+This is strongly preferred over Dict.insert since the implicit default imports can be overridden
+-}
+insertImport : String -> { alias : Maybe String, exposed : Exposed } -> ImportLookup -> ImportLookup
+insertImport moduleName importInfoToAdd importLookup =
+    Dict.update moduleName
+        (\existingImport ->
+            let
+                newImportInfo : { alias : Maybe String, exposed : Exposed }
+                newImportInfo =
+                    case existingImport of
+                        Nothing ->
+                            importInfoToAdd
+
+                        Just import_ ->
+                            { alias = listFirstJustMap .alias [ import_, importInfoToAdd ]
+                            , exposed = exposedMerge ( import_.exposed, importInfoToAdd.exposed )
+                            }
+            in
+            Just newImportInfo
+        )
+        importLookup
+
+
+exposedMerge : ( Exposed, Exposed ) -> Exposed
+exposedMerge exposedTuple =
+    case exposedTuple of
+        ( ExposedAll, _ ) ->
+            ExposedAll
+
+        ( ExposedSome _, ExposedAll ) ->
+            ExposedAll
+
+        ( ExposedSome aSet, ExposedSome bSet ) ->
+            ExposedSome (Set.union aSet bSet)
+
+
+qualify : ( String, String ) -> QualifyResources resources_ -> ( String, String )
+qualify ( moduleName, unqualifiedName ) qualifyResources =
+    let
+        qualification : String
+        qualification =
+            case qualifyResources.importLookup |> Dict.get moduleName of
+                Nothing ->
+                    moduleName
+
+                Just import_ ->
+                    let
+                        moduleImportedName : String
+                        moduleImportedName =
+                            import_.alias |> Maybe.withDefault moduleName
+                    in
+                    if not (isExposedFrom import_.exposed unqualifiedName) then
+                        moduleImportedName
+
+                    else
+                        let
+                            isShadowed : Bool
+                            isShadowed =
+                                isBindingInScope qualifyResources unqualifiedName
+                        in
+                        if isShadowed then
+                            moduleImportedName
+
+                        else
+                            ""
+    in
+    ( qualification, unqualifiedName )
+
+
+isExposedFrom : Exposed -> (String -> Bool)
+isExposedFrom exposed =
+    \potentialMember ->
+        case exposed of
+            ExposedAll ->
+                True
+
+            ExposedSome some ->
+                some |> Set.member potentialMember
+
+
+isBindingInScope :
+    { resources_
+        | moduleBindings : Set String
+        , localBindings : RangeDict (Set String)
+    }
+    -> String
+    -> Bool
+isBindingInScope resources binding =
+    Set.member binding resources.moduleBindings
+        || RangeDict.any (\bindings -> Set.member binding bindings) resources.localBindings
+
+
+{-| Whenever you add ranges on expression enter, the same ranges should be removed on expression exit.
+Having one function finding unique ranges and a function for extracting bindings there ensures said consistency.
+
+An alternative approach would be to use some kind of tree structure
+with parent and sub ranges and bindings as leaves (maybe a "trie", tho I've not seen one as an elm package).
+
+Removing all bindings for an expression's range on leave would then be trivial
+
+-}
+expressionSurfaceBindings : Expression -> Set String
+expressionSurfaceBindings expression =
+    case expression of
+        Elm.Syntax.Expression.LambdaExpression lambda ->
+            patternListBindings lambda.args
+
+        Elm.Syntax.Expression.LetExpression letBlock ->
+            letDeclarationListBindings letBlock.declarations
+
+        _ ->
+            Set.empty
+
+
+expressionBranchLocalBindings : Expression -> RangeDict (Set String)
+expressionBranchLocalBindings expression =
+    case expression of
+        Elm.Syntax.Expression.CaseExpression caseBlock ->
+            RangeDict.mapFromList
+                (\( Node _ pattern, Node resultRange _ ) ->
+                    ( resultRange
+                    , patternBindings pattern
+                    )
+                )
+                caseBlock.cases
+
+        Elm.Syntax.Expression.LetExpression letBlock ->
+            List.foldl
+                (\(Node _ letDeclaration) acc ->
+                    case letDeclaration of
+                        Elm.Syntax.Expression.LetFunction letFunctionOrValueDeclaration ->
+                            RangeDict.insert
+                                (Elm.Syntax.Node.range (Elm.Syntax.Node.value letFunctionOrValueDeclaration.declaration).expression)
+                                (patternListBindings
+                                    (Elm.Syntax.Node.value letFunctionOrValueDeclaration.declaration).arguments
+                                )
+                                acc
+
+                        _ ->
+                            acc
+                )
+                RangeDict.empty
+                letBlock.declarations
+
+        _ ->
+            RangeDict.empty
+
+
+patternListBindings : List (Node Pattern) -> Set String
+patternListBindings patterns =
+    List.foldl
+        (\(Node _ pattern) soFar -> Set.union soFar (patternBindings pattern))
+        Set.empty
+        patterns
+
+
+{-| Recursively find all bindings in a pattern.
+-}
+patternBindings : Pattern -> Set String
+patternBindings pattern =
+    -- IGNORE TCO
+    case pattern of
+        Elm.Syntax.Pattern.ListPattern patterns ->
+            patternListBindings patterns
+
+        Elm.Syntax.Pattern.TuplePattern patterns ->
+            patternListBindings patterns
+
+        Elm.Syntax.Pattern.RecordPattern patterns ->
+            Set.fromList (List.map Elm.Syntax.Node.value patterns)
+
+        Elm.Syntax.Pattern.NamedPattern _ patterns ->
+            patternListBindings patterns
+
+        Elm.Syntax.Pattern.UnConsPattern (Node _ headPattern) (Node _ tailPattern) ->
+            Set.union (patternBindings tailPattern) (patternBindings headPattern)
+
+        Elm.Syntax.Pattern.VarPattern variableName ->
+            Set.singleton variableName
+
+        Elm.Syntax.Pattern.AsPattern (Node _ pattern_) (Node _ variableName) ->
+            Set.insert variableName (patternBindings pattern_)
+
+        Elm.Syntax.Pattern.ParenthesizedPattern (Node _ inParens) ->
+            patternBindings inParens
+
+        Elm.Syntax.Pattern.AllPattern ->
+            Set.empty
+
+        Elm.Syntax.Pattern.UnitPattern ->
+            Set.empty
+
+        Elm.Syntax.Pattern.CharPattern _ ->
+            Set.empty
+
+        Elm.Syntax.Pattern.StringPattern _ ->
+            Set.empty
+
+        Elm.Syntax.Pattern.IntPattern _ ->
+            Set.empty
+
+        Elm.Syntax.Pattern.HexPattern _ ->
+            Set.empty
+
+        Elm.Syntax.Pattern.FloatPattern _ ->
+            Set.empty
+
+
+declarationListBindings : List (Node Declaration) -> Set String
+declarationListBindings declarationList =
+    declarationList
+        |> List.map (\(Node _ declaration) -> declarationBindings declaration)
+        |> List.foldl (\bindings soFar -> Set.union soFar bindings) Set.empty
+
+
+declarationBindings : Declaration -> Set String
+declarationBindings declaration =
+    case declaration of
+        Elm.Syntax.Declaration.CustomTypeDeclaration variantType ->
+            variantType.constructors
+                |> List.map (\(Node _ variant) -> Elm.Syntax.Node.value variant.name)
+                |> Set.fromList
+
+        Elm.Syntax.Declaration.FunctionDeclaration functionDeclaration ->
+            Set.singleton
+                (Elm.Syntax.Node.value (Elm.Syntax.Node.value functionDeclaration.declaration).name)
+
+        _ ->
+            Set.empty
+
+
+letDeclarationBindings : Elm.Syntax.Expression.LetDeclaration -> Set String
+letDeclarationBindings letDeclaration =
+    case letDeclaration of
+        Elm.Syntax.Expression.LetFunction fun ->
+            Set.singleton
+                (fun.declaration |> Elm.Syntax.Node.value |> .name |> Elm.Syntax.Node.value)
+
+        Elm.Syntax.Expression.LetDestructuring (Node _ pattern) _ ->
+            patternBindings pattern
+
+
+letDeclarationListBindings : List (Node Elm.Syntax.Expression.LetDeclaration) -> Set String
+letDeclarationListBindings letDeclarationList =
+    letDeclarationList
+        |> List.map
+            (\(Node _ declaration) -> letDeclarationBindings declaration)
+        |> List.foldl (\bindings soFar -> Set.union soFar bindings) Set.empty
+
+
+expressionExitVisitor : Node Expression -> ModuleContext -> ModuleContext
+expressionExitVisitor (Node expressionRange _) context =
+    if RangeDict.member expressionRange context.rangesToIgnore then
+        context
+
+    else
+        { context
+            | localBindings =
+                RangeDict.remove expressionRange context.localBindings
+        }
+
+
+expressionUpgradePerform :
+    Dict
+        ( String, String )
+        { oldArgumentCount : Int
+        , toNew :
+            UpgradeResources
+            -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
+        }
+    -> ModuleContext
+    ->
+        (Node Expression
+         ->
+            Maybe
+                { name : ( String, String )
+                , nameRange : Range
+                , callRange : Range
+                , replacement : String
+                , replacementDescription : String
+                , usedModules : Set String
+                }
+        )
+expressionUpgradePerform upgrade context =
+    \expressionNode ->
+        case expressionNode |> toReferenceOrCall of
+            Nothing ->
+                Nothing
+
+            Just valueOrFunctionOrCall ->
+                case Review.ModuleNameLookupTable.moduleNameAt context.lookupTable valueOrFunctionOrCall.nameRange of
+                    Nothing ->
+                        Nothing
+
+                    Just moduleName ->
+                        case Dict.get ( moduleName |> fromSyntaxModuleName, valueOrFunctionOrCall.name ) upgrade of
+                            Nothing ->
+                                Nothing
+
+                            Just upgradeForName ->
+                                let
+                                    range : Range
+                                    range =
+                                        case List.drop (upgradeForName.oldArgumentCount - 1) valueOrFunctionOrCall.arguments of
+                                            lastExpectedArg :: _ :: _ ->
+                                                -- Too many arguments!
+                                                -- We'll update the range to drop the extra ones and force the call style to application
+                                                { start = valueOrFunctionOrCall.nameRange.start, end = (Elm.Syntax.Node.range lastExpectedArg).end }
+
+                                            _ ->
+                                                expressionNode |> Elm.Syntax.Node.range
+
+                                    arguments : List (Node Expression)
+                                    arguments =
+                                        -- drop the extra arguments
+                                        List.take (upgradeForName.oldArgumentCount - 1) valueOrFunctionOrCall.arguments
+
+                                    upgradeResources : UpgradeResources
+                                    upgradeResources =
+                                        { lookupTable = context.lookupTable
+                                        , extractSourceCode = context.extractSourceCode
+                                        , importLookup = context.importLookup
+                                        , moduleBindings = context.moduleBindings
+                                        , localBindings = context.localBindings
+                                        , range = range
+                                        , nameRange = valueOrFunctionOrCall.nameRange
+                                        , arguments = arguments
+                                        }
+                                in
+                                upgradeForName.toNew upgradeResources
+                                    |> Maybe.map
+                                        (\replacement ->
+                                            { name = ( moduleName |> fromSyntaxModuleName, valueOrFunctionOrCall.name )
+                                            , nameRange = valueOrFunctionOrCall.nameRange
+                                            , callRange = range
+                                            , replacement = replacement.replacement
+                                            , replacementDescription = replacement.replacementDescription
+                                            , usedModules = replacement.usedModules
+                                            }
+                                        )
+
+
+upgradeReplacements :
+    Upgrade
+    ->
+        Dict
+            ( String, String )
+            { oldArgumentCount : Int
+            , toNew :
+                UpgradeResources
+                -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
+            }
+upgradeReplacements upgrade =
+    upgrade
+        |> Rope.toList
+        |> List.map
+            (\upgradeSingle ->
+                let
+                    singleReplacement :
+                        { oldName : ( String, String )
+                        , oldArgumentCount : Int
+                        , toNew :
+                            UpgradeResources
+                            -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
+                        }
+                    singleReplacement =
+                        upgradeSingle |> upgradeSingleReplacement
+                in
+                ( singleReplacement.oldName
+                , { oldArgumentCount = singleReplacement.oldArgumentCount
+                  , toNew = singleReplacement.toNew
+                  }
+                )
+            )
+        |> Dict.fromList
+
+
+upgradeSingleReplacement :
+    UpgradeSingle
+    ->
+        { oldName : ( String, String )
+        , oldArgumentCount : Int
+        , toNew :
+            UpgradeResources
+            -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
+        }
+upgradeSingleReplacement =
+    \upgradeSingle ->
+        case upgradeSingle of
+            CallToPipeline callToPipeline ->
+                { oldName = callToPipeline.oldName
+                , oldArgumentCount = callToPipeline.oldDefaultArgumentNames |> List.length
+                , toNew =
+                    \upgradeInfo ->
+                        let
+                            missingArgumentNames : List String
+                            missingArgumentNames =
+                                callToPipeline.oldDefaultArgumentNames
+                                    |> List.drop (upgradeInfo.arguments |> List.length)
+                                    |> List.map (\missingArgument -> missingArgument |> disambiguateFromBindingsInScope upgradeInfo)
+
+                            oldArguments : List Expression
+                            oldArguments =
+                                (upgradeInfo.arguments |> List.map Elm.Syntax.Node.value)
+                                    ++ (missingArgumentNames |> List.map (\arg -> Elm.Syntax.Expression.FunctionOrValue [] arg))
+                        in
+                        case oldArguments |> callToPipeline.oldArgumentsToNew of
+                            Nothing ->
+                                Nothing
+
+                            Just newPipeline ->
+                                let
+                                    usedModules : Set String
+                                    usedModules =
+                                        newPipeline
+                                            |> listFilledToList
+                                            |> List.concatMap (\application -> application.arguments)
+                                            |> List.foldl (\arg soFar -> Set.union soFar (arg |> expressionUsedModules))
+                                                (newPipeline
+                                                    |> listFilledToList
+                                                    |> List.map (\r -> r.name |> Tuple.first)
+                                                    |> Set.fromList
+                                                )
+
+                                    returnedString : String
+                                    returnedString =
+                                        newPipeline
+                                            |> listFilledToList
+                                            |> List.map
+                                                (\referenceOrApplicationInPipeline ->
+                                                    case referenceOrApplicationInPipeline.arguments of
+                                                        [] ->
+                                                            qualifiedToString (qualify referenceOrApplicationInPipeline.name upgradeInfo)
+
+                                                        argument0 :: arguments1Up ->
+                                                            [ qualifiedToString (qualify referenceOrApplicationInPipeline.name upgradeInfo)
+                                                            , "\n"
+                                                            , (argument0 :: arguments1Up)
+                                                                |> List.map
+                                                                    (\referenceOrApplicationInPipelineArgument ->
+                                                                        let
+                                                                            comesFromOld : Maybe Range
+                                                                            comesFromOld =
+                                                                                upgradeInfo.arguments
+                                                                                    |> listFirstJustMap
+                                                                                        (\(Node oldArgumentRange oldArgumentExpression) ->
+                                                                                            if oldArgumentExpression == referenceOrApplicationInPipelineArgument then
+                                                                                                Just oldArgumentRange
+
+                                                                                            else
+                                                                                                Nothing
+                                                                                        )
+
+                                                                            newArgumentString : String
+                                                                            newArgumentString =
+                                                                                case comesFromOld of
+                                                                                    Just oldArgumentRange ->
+                                                                                        (String.repeat (oldArgumentRange.start.column - 1) " "
+                                                                                            ++ upgradeInfo.extractSourceCode oldArgumentRange
+                                                                                        )
+                                                                                            |> removeIndentation
+
+                                                                                    Nothing ->
+                                                                                        referenceOrApplicationInPipelineArgument
+                                                                                            |> expressionQualify upgradeInfo
+                                                                                            |> Elm.Pretty.prettyExpression
+                                                                                            |> Pretty.pretty 110
+                                                                        in
+                                                                        if referenceOrApplicationInPipelineArgument |> expressionNeedsParens then
+                                                                            [ "(\n", newArgumentString, ")" ] |> String.concat
+
+                                                                        else
+                                                                            newArgumentString
+                                                                    )
+                                                                |> String.join "\n"
+                                                                |> addIndentation 4
+                                                            ]
+                                                                |> String.concat
+                                                )
+                                            |> String.join " |>\n"
+                                in
+                                { replacement =
+                                    toLambdaOrParenthesizedStringWithArguments
+                                        { argumentNames = missingArgumentNames
+                                        , returnedString = returnedString
+                                        }
+                                        |> String.split "\n"
+                                        |> String.join ("\n" ++ String.repeat (upgradeInfo.range.start.column - 1) " ")
+                                , replacementDescription =
+                                    Elm.CodeGen.pipe
+                                        (newPipeline |> listFilledHead |> inPipelineToExpression)
+                                        (newPipeline |> listFilledTail |> List.map inPipelineToExpression)
+                                        |> expressionQualify defaultQualifyResources
+                                        |> Elm.Pretty.prettyExpression
+                                        |> Pretty.pretty 1000
+                                        |> String.split "\n"
+                                        |> List.map (\line -> line |> String.dropLeft (line |> lineIndentation))
+                                        |> String.join " ; "
+                                , usedModules = usedModules
+                                }
+                                    |> Just
+                }
+
+
+inPipelineToExpression : { name : ( String, String ), arguments : List Expression } -> Expression
+inPipelineToExpression =
+    \inPipeline ->
+        Elm.CodeGen.fqConstruct
+            (inPipeline.name |> Tuple.first |> toSyntaxModuleName)
+            (inPipeline.name |> Tuple.second)
+            inPipeline.arguments
+
+
+toLambdaOrParenthesizedStringWithArguments : { argumentNames : List String, returnedString : String } -> String
+toLambdaOrParenthesizedStringWithArguments lambdaOrParenthesized =
+    case lambdaOrParenthesized.argumentNames of
+        [] ->
+            [ "(\n", lambdaOrParenthesized.returnedString, ")" ]
+                |> String.concat
+
+        argument0 :: arguments1Up ->
+            [ "("
+            , (argument0 :: arguments1Up) |> String.join " "
+            , " ->\n"
+            , lambdaOrParenthesized.returnedString |> addIndentation 4
+            , ")"
+            ]
+                |> String.concat
+
+
+addIndentation : Int -> (String -> String)
+addIndentation additionalIndentationLevel =
+    \originalString ->
+        originalString
+            |> String.split "\n"
+            |> List.map (\line -> String.repeat additionalIndentationLevel " " ++ line)
+            |> String.join "\n"
+
+
+removeIndentation : String -> String
+removeIndentation =
+    \indentedString ->
+        let
+            indentedLines : List String
+            indentedLines =
+                indentedString |> String.lines
+        in
+        case indentedLines |> List.map lineIndentation |> List.minimum of
+            Just smallestIndentationLevel ->
+                indentedLines
+                    |> List.map (\line -> line |> String.dropLeft smallestIndentationLevel)
+                    |> String.join "\n"
+
+            Nothing ->
+                indentedString
+
+
+lineIndentation : String -> Int
+lineIndentation =
+    \line ->
+        case line |> String.uncons of
+            Nothing ->
+                0
+
+            Just ( ' ', lineAfterSpace ) ->
+                lineAfterSpace |> lineIndentation
+
+            Just _ ->
+                0
+
+
+disambiguateFromBindingsInScope :
+    { resources_
+        | moduleBindings : Set String
+        , localBindings : RangeDict (Set String)
+    }
+    -> (String -> String)
+disambiguateFromBindingsInScope resources baseName =
+    if
+        (resources.moduleBindings |> Set.member baseName)
+            || (resources.localBindings |> RangeDict.any (Set.member baseName))
+    then
+        disambiguateFromBindingsInScope resources (baseName ++ "_")
+
+    else
+        baseName
+
+
+type alias UpgradeResources =
+    { lookupTable : ModuleNameLookupTable
+    , importLookup : ImportLookup
+    , extractSourceCode : Range -> String
+    , moduleBindings : Set String
+    , localBindings : RangeDict (Set String)
+    , range : Range
+    , nameRange : Range
+    , arguments : List (Node Expression)
+    }
+
+
+expressionNeedsParens : Expression -> Bool
+expressionNeedsParens expr =
+    case expr of
+        Elm.Syntax.Expression.Application _ ->
+            True
+
+        Elm.Syntax.Expression.OperatorApplication _ _ _ _ ->
+            True
+
+        Elm.Syntax.Expression.IfBlock _ _ _ ->
+            True
+
+        Elm.Syntax.Expression.Negation _ ->
+            True
+
+        Elm.Syntax.Expression.LetExpression _ ->
+            True
+
+        Elm.Syntax.Expression.CaseExpression _ ->
+            True
+
+        Elm.Syntax.Expression.LambdaExpression _ ->
+            True
+
+        Elm.Syntax.Expression.UnitExpr ->
+            False
+
+        Elm.Syntax.Expression.CharLiteral _ ->
+            False
+
+        Elm.Syntax.Expression.Integer _ ->
+            False
+
+        Elm.Syntax.Expression.Hex _ ->
+            False
+
+        Elm.Syntax.Expression.Floatable _ ->
+            False
+
+        Elm.Syntax.Expression.Literal _ ->
+            False
+
+        Elm.Syntax.Expression.GLSLExpression _ ->
+            False
+
+        Elm.Syntax.Expression.PrefixOperator _ ->
+            False
+
+        Elm.Syntax.Expression.RecordAccessFunction _ ->
+            False
+
+        Elm.Syntax.Expression.RecordAccess _ _ ->
+            False
+
+        Elm.Syntax.Expression.FunctionOrValue _ _ ->
+            False
+
+        Elm.Syntax.Expression.ParenthesizedExpression _ ->
+            False
+
+        Elm.Syntax.Expression.TupledExpression _ ->
+            False
+
+        Elm.Syntax.Expression.ListExpr _ ->
+            False
+
+        Elm.Syntax.Expression.RecordExpr _ ->
+            False
+
+        Elm.Syntax.Expression.RecordUpdateExpression _ _ ->
+            False
+
+        -- IMPOSSIBLE --
+        Elm.Syntax.Expression.Operator _ ->
+            False
+
+
+expressionQualify : QualifyResources resources_ -> (Expression -> Expression)
+expressionQualify resources =
+    \expression ->
+        expression
+            |> expressionMap
+                (\innerExpression ->
+                    case expression of
+                        Elm.Syntax.Expression.FunctionOrValue qualification unqualifiedName ->
+                            Elm.Syntax.Expression.FunctionOrValue
+                                (qualify ( qualification |> fromSyntaxModuleName, unqualifiedName ) resources
+                                    |> Tuple.first
+                                    |> toSyntaxModuleName
+                                )
+                                unqualifiedName
+
+                        _ ->
+                            -- TODO qualify named patterns in case and let and types in let
+                            innerExpression
+                )
+
+
+expressionUsedModules : Expression -> Set String
+expressionUsedModules =
+    -- IGNORE TCO
+    \expression ->
+        case expression of
+            Elm.Syntax.Expression.FunctionOrValue qualification _ ->
+                qualification |> fromSyntaxModuleName |> Set.singleton
+
+            otherExpression ->
+                -- TODO named patterns in case and let and types in let
+                otherExpression
+                    |> subExpressions
+                    |> List.foldl
+                        (\(Node _ innerExpression) soFar ->
+                            Set.union soFar (innerExpression |> expressionUsedModules)
+                        )
+                        Set.empty
+
+
+{-| Get all immediate child expressions of an expression
+-}
+subExpressions : Expression -> List (Node Expression)
+subExpressions expression =
+    case expression of
+        Elm.Syntax.Expression.LetExpression letBlock ->
+            letBlock.expression
+                :: (letBlock.declarations
+                        |> List.map
+                            (\(Node _ letDeclaration) ->
+                                case letDeclaration of
+                                    Elm.Syntax.Expression.LetFunction letFunction ->
+                                        letFunction.declaration |> Elm.Syntax.Node.value |> .expression
+
+                                    Elm.Syntax.Expression.LetDestructuring _ expression_ ->
+                                        expression_
+                            )
+                   )
+
+        Elm.Syntax.Expression.ListExpr expressions ->
+            expressions
+
+        Elm.Syntax.Expression.TupledExpression expressions ->
+            expressions
+
+        Elm.Syntax.Expression.RecordExpr fields ->
+            fields |> List.map (\(Node _ ( _, value )) -> value)
+
+        Elm.Syntax.Expression.RecordUpdateExpression _ setters ->
+            setters |> List.map (\(Node _ ( _, newValue )) -> newValue)
+
+        Elm.Syntax.Expression.RecordAccess recordToAccess _ ->
+            [ recordToAccess ]
+
+        Elm.Syntax.Expression.Application applicationElements ->
+            applicationElements
+
+        Elm.Syntax.Expression.CaseExpression caseBlock ->
+            caseBlock.expression
+                :: (caseBlock.cases |> List.map (\( _, caseExpression ) -> caseExpression))
+
+        Elm.Syntax.Expression.OperatorApplication _ _ e1 e2 ->
+            [ e1, e2 ]
+
+        Elm.Syntax.Expression.IfBlock condition then_ else_ ->
+            [ condition, then_, else_ ]
+
+        Elm.Syntax.Expression.LambdaExpression lambda ->
+            [ lambda.expression ]
+
+        Elm.Syntax.Expression.ParenthesizedExpression expressionInParens ->
+            [ expressionInParens ]
+
+        Elm.Syntax.Expression.Negation expressionInNegation ->
+            [ expressionInNegation ]
+
+        Elm.Syntax.Expression.UnitExpr ->
+            []
+
+        Elm.Syntax.Expression.Integer _ ->
+            []
+
+        Elm.Syntax.Expression.Hex _ ->
+            []
+
+        Elm.Syntax.Expression.Floatable _ ->
+            []
+
+        Elm.Syntax.Expression.Literal _ ->
+            []
+
+        Elm.Syntax.Expression.CharLiteral _ ->
+            []
+
+        Elm.Syntax.Expression.GLSLExpression _ ->
+            []
+
+        Elm.Syntax.Expression.RecordAccessFunction _ ->
+            []
+
+        Elm.Syntax.Expression.FunctionOrValue _ _ ->
+            []
+
+        Elm.Syntax.Expression.Operator _ ->
+            []
+
+        Elm.Syntax.Expression.PrefixOperator _ ->
+            []
+
+
+{-| Keep removing parens from the outside until we have something different from a `ParenthesizedExpression`
+-}
+removeParens : Node Expression -> Node Expression
+removeParens expressionNode =
+    case Elm.Syntax.Node.value expressionNode of
+        Elm.Syntax.Expression.ParenthesizedExpression expressionInsideOnePairOfParensNode ->
+            removeParens expressionInsideOnePairOfParensNode
+
+        _ ->
+            expressionNode
+
+
+{-| Map it, then all its sub-expressions, all the way down
+-}
+expressionMap : (Expression -> Expression) -> (Expression -> Expression)
+expressionMap expressionChange =
+    -- IGNORE TCO
+    \expression ->
+        let
+            step : Node Expression -> Node Expression
+            step =
+                Elm.Syntax.Node.map (\stepExpression -> stepExpression |> expressionMap expressionChange)
+        in
+        case expression |> expressionChange of
+            Elm.Syntax.Expression.LetExpression letBlock ->
+                Elm.Syntax.Expression.LetExpression
+                    { expression = letBlock.expression |> step
+                    , declarations =
+                        letBlock.declarations
+                            |> List.map
+                                (Elm.Syntax.Node.map
+                                    (\letDeclaration ->
+                                        case letDeclaration of
+                                            Elm.Syntax.Expression.LetFunction letFunction ->
+                                                Elm.Syntax.Expression.LetFunction
+                                                    { letFunction
+                                                        | declaration =
+                                                            letFunction.declaration
+                                                                |> Elm.Syntax.Node.map (\fun -> { fun | expression = fun.expression |> step })
+                                                    }
+
+                                            Elm.Syntax.Expression.LetDestructuring pattern expression_ ->
+                                                Elm.Syntax.Expression.LetDestructuring pattern (expression_ |> step)
+                                    )
+                                )
+                    }
+
+            Elm.Syntax.Expression.ListExpr expressions ->
+                Elm.Syntax.Expression.ListExpr (expressions |> List.map step)
+
+            Elm.Syntax.Expression.TupledExpression expressions ->
+                Elm.Syntax.Expression.TupledExpression (expressions |> List.map step)
+
+            Elm.Syntax.Expression.RecordExpr fields ->
+                Elm.Syntax.Expression.RecordExpr (fields |> List.map (Elm.Syntax.Node.map (Tuple.mapSecond step)))
+
+            Elm.Syntax.Expression.RecordUpdateExpression recordVariable setters ->
+                Elm.Syntax.Expression.RecordUpdateExpression recordVariable
+                    (setters |> List.map (Elm.Syntax.Node.map (Tuple.mapSecond step)))
+
+            Elm.Syntax.Expression.RecordAccess recordToAccess fieldName ->
+                Elm.Syntax.Expression.RecordAccess (recordToAccess |> step) fieldName
+
+            Elm.Syntax.Expression.Application applicationElements ->
+                Elm.Syntax.Expression.Application (applicationElements |> List.map step)
+
+            Elm.Syntax.Expression.CaseExpression caseBlock ->
+                Elm.Syntax.Expression.CaseExpression
+                    { expression = caseBlock.expression
+                    , cases = caseBlock.cases |> List.map (Tuple.mapSecond step)
+                    }
+
+            Elm.Syntax.Expression.OperatorApplication symbol direction left right ->
+                Elm.Syntax.Expression.OperatorApplication symbol direction (left |> step) (right |> step)
+
+            Elm.Syntax.Expression.IfBlock condition then_ else_ ->
+                Elm.Syntax.Expression.IfBlock (condition |> step) (then_ |> step) (else_ |> step)
+
+            Elm.Syntax.Expression.LambdaExpression lambda ->
+                Elm.Syntax.Expression.LambdaExpression { lambda | expression = lambda.expression |> step }
+
+            Elm.Syntax.Expression.ParenthesizedExpression expressionInParens ->
+                Elm.Syntax.Expression.ParenthesizedExpression (expressionInParens |> step)
+
+            Elm.Syntax.Expression.Negation expressionInNegation ->
+                Elm.Syntax.Expression.Negation (expressionInNegation |> step)
+
+            Elm.Syntax.Expression.UnitExpr ->
+                Elm.Syntax.Expression.UnitExpr
+
+            Elm.Syntax.Expression.Integer int ->
+                Elm.Syntax.Expression.Integer int
+
+            Elm.Syntax.Expression.Hex int ->
+                Elm.Syntax.Expression.Hex int
+
+            Elm.Syntax.Expression.Floatable float ->
+                Elm.Syntax.Expression.Floatable float
+
+            Elm.Syntax.Expression.Literal string ->
+                Elm.Syntax.Expression.Literal string
+
+            Elm.Syntax.Expression.CharLiteral char ->
+                Elm.Syntax.Expression.CharLiteral char
+
+            Elm.Syntax.Expression.GLSLExpression glsl ->
+                Elm.Syntax.Expression.GLSLExpression glsl
+
+            Elm.Syntax.Expression.RecordAccessFunction fieldName ->
+                Elm.Syntax.Expression.RecordAccessFunction fieldName
+
+            Elm.Syntax.Expression.FunctionOrValue qualification unqualifiedName ->
+                Elm.Syntax.Expression.FunctionOrValue qualification unqualifiedName
+
+            Elm.Syntax.Expression.Operator symbol ->
+                Elm.Syntax.Expression.Operator symbol
+
+            Elm.Syntax.Expression.PrefixOperator symbol ->
+                Elm.Syntax.Expression.PrefixOperator symbol
+
+
+{-| Parses either a value reference
+or a function reference with or without arguments.
+-}
+toReferenceOrCall :
+    Node Expression
+    ->
+        Maybe
+            { range : Range
+            , name : String
+            , nameRange : Range
+            , arguments : List (Node Expression)
+            }
+toReferenceOrCall baseNode =
+    let
+        step :
+            { arguments : ListFilled (Node Expression), fed : Node Expression }
+            -> Maybe { range : Range, nameRange : Range, name : String, arguments : List (Node Expression) }
+        step layer =
+            layer.fed
+                |> toReferenceOrCall
+                |> Maybe.map
+                    (\fed ->
+                        { range = baseNode |> Elm.Syntax.Node.range
+                        , nameRange = fed.nameRange
+                        , name = fed.name
+                        , arguments = fed.arguments ++ (layer.arguments |> listFilledToList)
+                        }
+                    )
+    in
+    case baseNode |> removeParens of
+        Node nameRange (Elm.Syntax.Expression.FunctionOrValue _ unqualifiedName) ->
+            Just
+                { range = Elm.Syntax.Node.range baseNode
+                , nameRange = nameRange
+                , name = unqualifiedName
+                , arguments = []
+                }
+
+        Node _ (Elm.Syntax.Expression.Application (fed :: argument0 :: argument1Up)) ->
+            step
+                { fed = fed
+                , arguments = ( argument0, argument1Up )
+                }
+
+        Node _ (Elm.Syntax.Expression.OperatorApplication "|>" _ argument0 fed) ->
+            step
+                { fed = fed
+                , arguments = ( argument0, [] )
+                }
+
+        Node _ (Elm.Syntax.Expression.OperatorApplication "<|" _ fed argument0) ->
+            step
+                { fed = fed
+                , arguments = ( argument0, [] )
+                }
+
+        _ ->
+            Nothing
+
+
+{-| Put a `ModuleName` and thing name together as a string.
+If desired, call in combination with `qualify`
+-}
+qualifiedToString : ( String, String ) -> String
+qualifiedToString ( moduleName, unqualifiedName ) =
+    case moduleName of
+        "" ->
+            unqualifiedName
+
+        existingModuleName ->
+            [ existingModuleName, ".", unqualifiedName ] |> String.concat
+
+
+fromSyntaxModuleName : Elm.Syntax.ModuleName.ModuleName -> String
+fromSyntaxModuleName moduleName =
+    String.join "." moduleName
+
+
+toSyntaxModuleName : String -> Elm.Syntax.ModuleName.ModuleName
+toSyntaxModuleName string =
+    String.split "." string
+
+
+
+-- ListFilled
+
+
+type alias ListFilled element =
+    ( element, List element )
+
+
+listFilledHead : ListFilled a -> a
+listFilledHead ( head, _ ) =
+    head
+
+
+listFilledTail : ListFilled a -> List a
+listFilledTail ( _, tail ) =
+    tail
+
+
+listFilledToList : ListFilled a -> List a
+listFilledToList =
+    \( head, tail ) -> head :: tail
+
+
+listFilledAttach : List a -> (ListFilled a -> ListFilled a)
+listFilledAttach attachment =
+    \baseListFilled ->
+        ( baseListFilled |> listFilledHead
+        , (baseListFilled |> listFilledTail) ++ attachment
+        )
+
+
+
+-- List
+
+
+listFirstJustMap : (a -> Maybe b) -> List a -> Maybe b
+listFirstJustMap mapper nodes =
+    case nodes of
+        [] ->
+            Nothing
+
+        node :: rest ->
+            case mapper node of
+                Just value ->
+                    Just value
+
+                Nothing ->
+                    listFirstJustMap mapper rest
