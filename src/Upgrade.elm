@@ -1200,19 +1200,13 @@ upgradeSingleReplacement =
                                         |> String.split "\n"
                                         |> String.join ("\n" ++ String.repeat (upgradeInfo.range.start.column - 1) " ")
                                 , replacementDescription =
-                                    { argumentNames = missingArgumentNames
-                                    , returnedString =
-                                        Elm.CodeGen.pipe
-                                            (newPipeline |> listFilledHead |> inPipelineToExpression)
-                                            (newPipeline |> listFilledTail |> List.map inPipelineToExpression)
-                                            |> expressionQualify defaultQualifyResources
-                                            |> Elm.Pretty.prettyExpression
-                                            |> Pretty.pretty 1000
-                                            |> String.split "\n"
-                                            |> List.map (\line -> line |> String.dropLeft (line |> lineIndentation))
-                                            |> String.join " ; "
-                                    }
-                                        |> toLambdaOrParenthesizedStringWithArgumentsSingleLine
+                                    newPipeline
+                                        |> listFilledToList
+                                        |> List.map
+                                            (\inPipeline ->
+                                                inPipeline.name |> qualify defaultQualifyResources |> qualifiedToString
+                                            )
+                                        |> String.join ", then "
                                 , usedModules = usedModules
                                 }
                                     |> Just
