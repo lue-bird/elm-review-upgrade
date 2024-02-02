@@ -65,7 +65,7 @@ type alias Upgrade =
 type UpgradeSingle
     = Application
         { oldName : ( String, String )
-        , oldDefaultArgumentNames : List String
+        , oldArgumentNames : List String
         , oldArgumentsToNew :
             List Expression
             ->
@@ -91,7 +91,7 @@ reference : { old : ( String, String ), new : ( String, String ) } -> Upgrade
 reference nameChange =
     application
         { oldName = nameChange.old
-        , oldDefaultArgumentNames = []
+        , oldArgumentNames = []
         , oldArgumentsToNew =
             \oldArguments -> Just (call nameChange.new oldArguments)
         }
@@ -160,7 +160,7 @@ or [`elm-syntax`](https://dark.elm.dmy.fr/packages/stil4m/elm-syntax/latest/) di
 -}
 application :
     { oldName : ( String, String )
-    , oldDefaultArgumentNames : List String
+    , oldArgumentNames : List String
     , oldArgumentsToNew :
         List Expression
         ->
@@ -1101,13 +1101,13 @@ upgradeSingleReplacement =
         case upgradeSingle of
             Application applicationUpgrade ->
                 { oldName = applicationUpgrade.oldName
-                , oldArgumentCount = applicationUpgrade.oldDefaultArgumentNames |> List.length
+                , oldArgumentCount = applicationUpgrade.oldArgumentNames |> List.length
                 , toNew =
                     \upgradeInfo ->
                         let
                             missingArgumentNames : List String
                             missingArgumentNames =
-                                applicationUpgrade.oldDefaultArgumentNames
+                                applicationUpgrade.oldArgumentNames
                                     |> List.drop (upgradeInfo.arguments |> List.length)
                                     |> List.map (\missingArgument -> missingArgument |> disambiguateFromBindingsInScope upgradeInfo)
 
