@@ -590,9 +590,10 @@ declarationVisitor declarationNode context =
             { context
                 | rangesToIgnore = RangeDict.empty
                 , localBindings =
-                    RangeDict.singleton
-                        (functionDeclaration.declaration |> Elm.Syntax.Node.range)
-                        (patternListBindings (functionDeclaration.declaration |> Elm.Syntax.Node.value).arguments)
+                    RangeDict.one
+                        ( functionDeclaration.declaration |> Elm.Syntax.Node.range
+                        , functionDeclaration.declaration |> Elm.Syntax.Node.value |> .arguments |> patternListBindings
+                        )
             }
 
         _ ->
@@ -674,7 +675,7 @@ isBindingInScope :
     -> Bool
 isBindingInScope resources binding =
     Set.member binding resources.moduleBindings
-        || RangeDict.any (\_ bindings -> Set.member binding bindings) resources.localBindings
+        || RangeDict.any (\( _, bindings ) -> Set.member binding bindings) resources.localBindings
 
 
 expressionVisitor :
@@ -697,7 +698,7 @@ expressionVisitor upgrade context =
             expressionRange =
                 expressionNode |> Elm.Syntax.Node.range
         in
-        if RangeDict.any (\ignoreRange () -> ignoreRange |> rangeContainsLocation expressionRange.start) context.rangesToIgnore then
+        if RangeDict.any (\( ignoreRange, () ) -> ignoreRange |> rangeContainsLocation expressionRange.start) context.rangesToIgnore then
             ( [], context )
 
         else
@@ -708,7 +709,7 @@ expressionVisitor upgrade context =
 
                 withExpressionSurfaceBindings : RangeDict (Set String)
                 withExpressionSurfaceBindings =
-                    RangeDict.insert expressionRange (expressionSurfaceBindings expression) context.localBindings
+                    context.localBindings |> RangeDict.insert ( expressionRange, expressionSurfaceBindings expression )
 
                 withNewBranchLocalBindings : RangeDict (Set String)
                 withNewBranchLocalBindings =
@@ -728,9 +729,9 @@ expressionVisitor upgrade context =
                         Just currentBranchLocalBindings ->
                             { context
                                 | localBindings =
-                                    RangeDict.insert expressionRange currentBranchLocalBindings withExpressionSurfaceBindings
+                                    withExpressionSurfaceBindings |> RangeDict.insert ( expressionRange, currentBranchLocalBindings )
                                 , branchLocalBindings =
-                                    RangeDict.remove expressionRange withNewBranchLocalBindings
+                                    withNewBranchLocalBindings |> RangeDict.remove expressionRange
                             }
 
                 upgradePerformed :
@@ -781,7 +782,7 @@ expressionVisitor upgrade context =
                             ]
                       ]
                     , { contextWithInferredConstantsAndLocalBindings
-                        | rangesToIgnore = context.rangesToIgnore |> RangeDict.insert successfulUpgrade.range ()
+                        | rangesToIgnore = context.rangesToIgnore |> RangeDict.insert ( successfulUpgrade.range, () )
                       }
                     )
 
@@ -841,18 +842,18 @@ expressionBranchLocalBindings expression =
 
         Elm.Syntax.Expression.LetExpression letBlock ->
             List.foldl
-                (\(Node _ letDeclaration) acc ->
+                (\(Node _ letDeclaration) soFar ->
                     case letDeclaration of
                         Elm.Syntax.Expression.LetFunction letFunctionOrValueDeclaration ->
-                            RangeDict.insert
-                                (Elm.Syntax.Node.range (Elm.Syntax.Node.value letFunctionOrValueDeclaration.declaration).expression)
-                                (patternListBindings
-                                    (Elm.Syntax.Node.value letFunctionOrValueDeclaration.declaration).arguments
-                                )
-                                acc
+                            soFar
+                                |> RangeDict.insert
+                                    ( letFunctionOrValueDeclaration.declaration |> Elm.Syntax.Node.value |> .expression |> Elm.Syntax.Node.range
+                                    , patternListBindings
+                                        (Elm.Syntax.Node.value letFunctionOrValueDeclaration.declaration).arguments
+                                    )
 
                         _ ->
-                            acc
+                            soFar
                 )
                 RangeDict.empty
                 letBlock.declarations
@@ -1267,7 +1268,7 @@ disambiguateFromBindingsInScope :
 disambiguateFromBindingsInScope resources baseName =
     if
         (resources.moduleBindings |> Set.member baseName)
-            || (resources.localBindings |> RangeDict.any (\_ -> Set.member baseName))
+            || (resources.localBindings |> RangeDict.any (\( _, bindings ) -> bindings |> Set.member baseName))
     then
         disambiguateFromBindingsInScope resources (baseName ++ "_")
 
