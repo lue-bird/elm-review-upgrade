@@ -913,7 +913,7 @@ expressionUpgradePerform upgrade context =
                                     arguments : List (Node Expression)
                                     arguments =
                                         -- drop the extra arguments
-                                        List.take (upgradeForName.oldArgumentCount - 1) referenceOrApplication.arguments
+                                        List.take upgradeForName.oldArgumentCount referenceOrApplication.arguments
 
                                     upgradeResources : UpgradeResources
                                     upgradeResources =
@@ -977,7 +977,7 @@ toReferenceOrApplication baseNode =
     case baseNode |> removeParens of
         Node referenceRange (Elm.Syntax.Expression.FunctionOrValue _ unqualifiedName) ->
             Just
-                { range = Elm.Syntax.Node.range baseNode
+                { range = baseNode |> Elm.Syntax.Node.range
                 , referenceRange = referenceRange
                 , name = unqualifiedName
                 , arguments = []
