@@ -14,7 +14,7 @@ module ReviewConfig exposing (config)
 
 import Review.Rule
 import Upgrade
-import Elm.Syntax.Expression -- stil4m/elm-syntax
+import Elm.CodeGen -- the-sett/elm-syntax-dsl
 
 config : List Review.Rule.Rule
 config =
@@ -22,15 +22,14 @@ config =
         [ Upgrade.reference { old = ( "Fuzz", "tuple" ), new = ( "Fuzz", "pair" ) }
         , Upgrade.application
             { oldName = ( "Expect", "true" )
-            , oldArgumentNames = [ "onFalseDescription" ]
+            , oldArgumentNames = [ "onFalseDescription", "actualBool" ]
             , oldArgumentsToNew =
                 \oldArguments ->
                     case oldArguments of
-                        [ descriptionArgument ] ->
+                        [ onFalse, actual ] ->
                             Upgrade.call ( "Expect", "equals" )
-                                [ Elm.Syntax.Expression.FunctionOrValue [ "Basics" ] "True" ]
-                                |> Upgrade.pipeInto ( "Expect", "onFail" )
-                                    [ descriptionArgument ]
+                                [ Elm.CodeGen.fqVal [ "Basics" ] "True", actual ]
+                                |> Upgrade.pipeInto ( "Expect", "onFail" ) [ onFalse ]
                                 |> Just
                         
                         _ ->
