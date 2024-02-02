@@ -774,6 +774,7 @@ expressionVisitor upgrade context =
                               in
                               Review.Fix.insertAt { row = context.importRow, column = 1 }
                                 (modulesToImport
+                                    |> Set.remove ""
                                     |> Set.toList
                                     |> List.concatMap (\moduleName -> [ "import ", moduleName, "\n" ])
                                     |> String.concat
@@ -1192,22 +1193,26 @@ upgradeSingleReplacement =
                                             |> String.join " |>\n"
                                 in
                                 { replacement =
-                                    toLambdaOrParenthesizedStringWithArguments
-                                        { argumentNames = missingArgumentNames
-                                        , returnedString = returnedString
-                                        }
+                                    { argumentNames = missingArgumentNames
+                                    , returnedString = returnedString
+                                    }
+                                        |> toLambdaOrParenthesizedStringWithArgumentsMultiline
                                         |> String.split "\n"
                                         |> String.join ("\n" ++ String.repeat (upgradeInfo.range.start.column - 1) " ")
                                 , replacementDescription =
-                                    Elm.CodeGen.pipe
-                                        (newPipeline |> listFilledHead |> inPipelineToExpression)
-                                        (newPipeline |> listFilledTail |> List.map inPipelineToExpression)
-                                        |> expressionQualify defaultQualifyResources
-                                        |> Elm.Pretty.prettyExpression
-                                        |> Pretty.pretty 1000
-                                        |> String.split "\n"
-                                        |> List.map (\line -> line |> String.dropLeft (line |> lineIndentation))
-                                        |> String.join " ; "
+                                    { argumentNames = missingArgumentNames
+                                    , returnedString =
+                                        Elm.CodeGen.pipe
+                                            (newPipeline |> listFilledHead |> inPipelineToExpression)
+                                            (newPipeline |> listFilledTail |> List.map inPipelineToExpression)
+                                            |> expressionQualify defaultQualifyResources
+                                            |> Elm.Pretty.prettyExpression
+                                            |> Pretty.pretty 1000
+                                            |> String.split "\n"
+                                            |> List.map (\line -> line |> String.dropLeft (line |> lineIndentation))
+                                            |> String.join " ; "
+                                    }
+                                        |> toLambdaOrParenthesizedStringWithArgumentsSingleLine
                                 , usedModules = usedModules
                                 }
                                     |> Just
@@ -1215,8 +1220,14 @@ upgradeSingleReplacement =
 
 
 toSyntaxModuleName : String -> Elm.Syntax.ModuleName.ModuleName
-toSyntaxModuleName string =
-    String.split "." string
+toSyntaxModuleName =
+    \moduleName ->
+        case moduleName of
+            "" ->
+                []
+
+            nonEmptyModuleName ->
+                nonEmptyModuleName |> String.split "."
 
 
 inPipelineToExpression : { name : ( String, String ), arguments : List Expression } -> Expression
@@ -1228,19 +1239,34 @@ inPipelineToExpression =
             inPipeline.arguments
 
 
-toLambdaOrParenthesizedStringWithArguments : { argumentNames : List String, returnedString : String } -> String
-toLambdaOrParenthesizedStringWithArguments lambdaOrParenthesized =
+toLambdaOrParenthesizedStringWithArgumentsMultiline : { argumentNames : List String, returnedString : String } -> String
+toLambdaOrParenthesizedStringWithArgumentsMultiline lambdaOrParenthesized =
     case lambdaOrParenthesized.argumentNames of
         [] ->
             [ "(\n", lambdaOrParenthesized.returnedString, ")" ]
                 |> String.concat
 
         argument0 :: arguments1Up ->
-            [ "("
+            [ "(\\"
             , (argument0 :: arguments1Up) |> String.join " "
             , " ->\n"
             , lambdaOrParenthesized.returnedString |> addIndentation 4
             , ")"
+            ]
+                |> String.concat
+
+
+toLambdaOrParenthesizedStringWithArgumentsSingleLine : { argumentNames : List String, returnedString : String } -> String
+toLambdaOrParenthesizedStringWithArgumentsSingleLine lambdaOrParenthesized =
+    case lambdaOrParenthesized.argumentNames of
+        [] ->
+            lambdaOrParenthesized.returnedString
+
+        argument0 :: arguments1Up ->
+            [ "\\"
+            , (argument0 :: arguments1Up) |> String.join " "
+            , " -> "
+            , lambdaOrParenthesized.returnedString
             ]
                 |> String.concat
 
