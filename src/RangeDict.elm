@@ -5,7 +5,7 @@ import Elm.Syntax.Range exposing (Range)
 
 
 type RangeDict v
-    = RangeDict (Dict String v)
+    = RangeDict (Dict ( ( Int, Int ), ( Int, Int ) ) v)
 
 
 empty : RangeDict v_
@@ -13,20 +13,24 @@ empty =
     RangeDict Dict.empty
 
 
-rangeAsString : Range -> String
-rangeAsString range =
-    [ range.start.row
-    , range.start.column
-    , range.end.row
-    , range.end.column
-    ]
-        |> List.map String.fromInt
-        |> String.join "_"
+rangeToTuple : Range -> ( ( Int, Int ), ( Int, Int ) )
+rangeToTuple range =
+    ( ( range.start.row, range.start.column )
+    , ( range.end.row, range.end.column )
+    )
+
+
+tupleToRange : ( ( Int, Int ), ( Int, Int ) ) -> Range
+tupleToRange =
+    \( ( startRow, startColumn ), ( endRow, endColumn ) ) ->
+        { start = { row = startRow, column = startColumn }
+        , end = { row = endRow, column = endColumn }
+        }
 
 
 singleton : Range -> v -> RangeDict v
 singleton range value =
-    RangeDict (Dict.singleton (rangeAsString range) value)
+    RangeDict (Dict.singleton (rangeToTuple range) value)
 
 
 {-| Indirect conversion from a list to key-value pairs to avoid successive List.map calls.
@@ -39,7 +43,7 @@ mapFromList toAssociation list =
                 ( range, v ) =
                     toAssociation element
             in
-            Dict.insert (rangeAsString range) v acc
+            Dict.insert (rangeToTuple range) v acc
         )
         Dict.empty
         list
@@ -48,34 +52,34 @@ mapFromList toAssociation list =
 
 insert : Range -> v -> RangeDict v -> RangeDict v
 insert range value (RangeDict rangeDict) =
-    RangeDict (Dict.insert (rangeAsString range) value rangeDict)
+    RangeDict (Dict.insert (rangeToTuple range) value rangeDict)
 
 
 remove : Range -> RangeDict v -> RangeDict v
 remove range (RangeDict rangeDict) =
-    RangeDict (Dict.remove (rangeAsString range) rangeDict)
+    RangeDict (Dict.remove (rangeToTuple range) rangeDict)
 
 
 get : Range -> RangeDict v -> Maybe v
 get range (RangeDict rangeDict) =
-    Dict.get (rangeAsString range) rangeDict
+    Dict.get (rangeToTuple range) rangeDict
 
 
 member : Range -> RangeDict v_ -> Bool
 member range (RangeDict rangeDict) =
-    Dict.member (rangeAsString range) rangeDict
+    Dict.member (rangeToTuple range) rangeDict
 
 
-any : (v -> Bool) -> RangeDict v -> Bool
+any : (Range -> v -> Bool) -> RangeDict v -> Bool
 any isFound rangeDict =
-    foldl (\value soFar -> soFar || isFound value)
+    foldl (\range value soFar -> soFar || isFound range value)
         False
         rangeDict
 
 
-foldl : (v -> folded -> folded) -> folded -> RangeDict v -> folded
+foldl : (Range -> v -> folded -> folded) -> folded -> RangeDict v -> folded
 foldl reduce initialFolded (RangeDict rangeDict) =
-    Dict.foldl (\_ -> reduce) initialFolded rangeDict
+    Dict.foldl (\tuple -> reduce (tuple |> tupleToRange)) initialFolded rangeDict
 
 
 union : RangeDict v -> RangeDict v -> RangeDict v

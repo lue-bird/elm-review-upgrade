@@ -30,7 +30,6 @@ elm-review --template jfmengels/elm-review-upgrade/example --rules Upgrade
 -}
 
 import Dict exposing (Dict)
-import Elm.CodeGen
 import Elm.Pretty
 import Elm.Syntax.Declaration exposing (Declaration)
 import Elm.Syntax.Exposing
@@ -675,7 +674,7 @@ isBindingInScope :
     -> Bool
 isBindingInScope resources binding =
     Set.member binding resources.moduleBindings
-        || RangeDict.any (\bindings -> Set.member binding bindings) resources.localBindings
+        || RangeDict.any (\_ bindings -> Set.member binding bindings) resources.localBindings
 
 
 expressionVisitor :
@@ -698,7 +697,7 @@ expressionVisitor upgrade context =
             expressionRange =
                 expressionNode |> Elm.Syntax.Node.range
         in
-        if RangeDict.member expressionRange context.rangesToIgnore then
+        if RangeDict.any (\ignoreRange () -> ignoreRange |> rangeContainsLocation expressionRange.start) context.rangesToIgnore then
             ( [], context )
 
         else
@@ -1224,15 +1223,6 @@ toSyntaxModuleName =
                 nonEmptyModuleName |> String.split "."
 
 
-inPipelineToExpression : { name : ( String, String ), arguments : List Expression } -> Expression
-inPipelineToExpression =
-    \inPipeline ->
-        Elm.CodeGen.fqConstruct
-            (inPipeline.name |> Tuple.first |> toSyntaxModuleName)
-            (inPipeline.name |> Tuple.second)
-            inPipeline.arguments
-
-
 toLambdaOrParenthesizedStringWithArgumentsMultiline : { argumentNames : List String, returnedString : String } -> String
 toLambdaOrParenthesizedStringWithArgumentsMultiline lambdaOrParenthesized =
     case lambdaOrParenthesized.argumentNames of
@@ -1246,21 +1236,6 @@ toLambdaOrParenthesizedStringWithArgumentsMultiline lambdaOrParenthesized =
             , " ->\n"
             , lambdaOrParenthesized.returnedString |> addIndentation 4
             , ")"
-            ]
-                |> String.concat
-
-
-toLambdaOrParenthesizedStringWithArgumentsSingleLine : { argumentNames : List String, returnedString : String } -> String
-toLambdaOrParenthesizedStringWithArgumentsSingleLine lambdaOrParenthesized =
-    case lambdaOrParenthesized.argumentNames of
-        [] ->
-            lambdaOrParenthesized.returnedString
-
-        argument0 :: arguments1Up ->
-            [ "\\"
-            , (argument0 :: arguments1Up) |> String.join " "
-            , " -> "
-            , lambdaOrParenthesized.returnedString
             ]
                 |> String.concat
 
@@ -1292,7 +1267,7 @@ disambiguateFromBindingsInScope :
 disambiguateFromBindingsInScope resources baseName =
     if
         (resources.moduleBindings |> Set.member baseName)
-            || (resources.localBindings |> RangeDict.any (Set.member baseName))
+            || (resources.localBindings |> RangeDict.any (\_ -> Set.member baseName))
     then
         disambiguateFromBindingsInScope resources (baseName ++ "_")
 
@@ -1958,6 +1933,20 @@ type alias ImportLookup =
         { alias : Maybe String
         , exposed : Exposed -- includes names of found variants
         }
+
+
+rangeContainsLocation : Elm.Syntax.Range.Location -> Range -> Bool
+rangeContainsLocation location =
+    \range ->
+        case ( Elm.Syntax.Range.compareLocations location range.start, Elm.Syntax.Range.compareLocations location range.end ) of
+            ( LT, _ ) ->
+                False
+
+            ( _, GT ) ->
+                False
+
+            _ ->
+                True
 
 
 
