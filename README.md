@@ -19,7 +19,7 @@ import Elm.Syntax.Expression -- stil4m/elm-syntax
 config : List Review.Rule.Rule
 config =
     [ Upgrade.rule
-        [ Upgrade.name { old = ( "Fuzz", "tuple" ), new = ( "Fuzz", "pair" ) }
+        [ Upgrade.reference { old = ( "Fuzz", "tuple" ), new = ( "Fuzz", "pair" ) }
         , Upgrade.application
             { oldName = ( "Expect", "true" )
             , oldArgumentNames = [ "onFalseDescription" ]

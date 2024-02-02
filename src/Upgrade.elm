@@ -1,6 +1,6 @@
 module Upgrade exposing
     ( rule
-    , Upgrade, UpgradeSingle, name, application
+    , Upgrade, UpgradeSingle, reference, application
     , call, pipeInto
     )
 
@@ -10,12 +10,12 @@ module Upgrade exposing
 
     config =
         [ Upgrade.rule
-            [ Upgrade.name { old = ( "MyUtil", "findMap" ), new = ( "List.Extra", "findMap" ) }
+            [ Upgrade.reference { old = ( "MyUtil", "findMap" ), new = ( "List.Extra", "findMap" ) }
             ]
         ]
 
 @docs rule
-@docs Upgrade, UpgradeSingle, name, application
+@docs Upgrade, UpgradeSingle, reference, application
 @docs call, pipeInto
 
 
@@ -80,14 +80,14 @@ type UpgradeSingle
         }
 
 
-{-| [`Upgrade`](#Upgrade) only the name.
+{-| [`Upgrade`](#Upgrade) only the name of the value/function.
 For example to replace every `MyUtil.findMap` with `List.Extra.findMap`:
 
-    Upgrade.name { old = "MyUtil", "findMap" ), new = ( "List.Extra", "findMap" ) }
+    Upgrade.reference { old = "MyUtil", "findMap" ), new = ( "List.Extra", "findMap" ) }
 
 -}
-name : { old : ( String, String ), new : ( String, String ) } -> Upgrade
-name nameChange =
+reference : { old : ( String, String ), new : ( String, String ) } -> Upgrade
+reference nameChange =
     application
         { oldName = nameChange.old
         , oldDefaultArgumentNames = []

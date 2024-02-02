@@ -17,7 +17,7 @@ a = findMap
 """
                     |> Review.Test.run
                         (Upgrade.rule
-                            [ Upgrade.name { old = ( "MyUtil", "filterMap" ), new = ( "List.Extra", "filterMap" ) }
+                            [ Upgrade.reference { old = ( "MyUtil", "filterMap" ), new = ( "List.Extra", "filterMap" ) }
                             ]
                         )
                     |> Review.Test.expectNoErrors
@@ -31,7 +31,7 @@ a = Util.findMap
 """
                     |> Review.Test.run
                         (Upgrade.rule
-                            [ Upgrade.name { old = ( "MyUtil", "findMap" ), new = ( "List.Extra", "findMap" ) }
+                            [ Upgrade.reference { old = ( "MyUtil", "findMap" ), new = ( "List.Extra", "findMap" ) }
                             ]
                         )
                     |> Review.Test.expectErrors
