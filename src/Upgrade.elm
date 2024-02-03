@@ -1,12 +1,13 @@
 module Upgrade exposing
     ( rule
-    , Upgrade, UpgradeSingle(..)
+    , Upgrade
     , reference, application, call, pipeInto
     , typeReference, type_
     , batch
+    , UpgradeSingle(..)
     )
 
-{-| Reports when an expression can be simplified.
+{-| Reports when an outdated function/type can be replaced.
 
 🔧 Running with `--fix` will automatically remove all the reported errors.
 
@@ -31,10 +32,15 @@ module Upgrade exposing
         ]
 
 @docs rule
-@docs Upgrade, UpgradeSingle
+@docs Upgrade
 @docs reference, application, call, pipeInto
 @docs typeReference, type_
 @docs batch
+
+
+## safe internals
+
+@docs UpgradeSingle
 
 -}
 
@@ -68,13 +74,19 @@ import Type.LocalExtra
 -- upgrade
 
 
-{-| A bunch of [`UpgradeSingle`](#UpgradeSingle)s to transform your code
+{-| Describes a bunch of transformations to your code. To create one:
+
+  - [`Upgrade.reference`](#reference), [`Upgrade.application`](#application)
+  - [`Upgrade.typeReference`](#reference), [`Upgrade.type_`](#application)
+
+To group a few of them together, use [`Upgrade.batch`](#batch)
+
 -}
 type alias Upgrade =
     Rope UpgradeSingle
 
 
-{-| An upgrade for a single function/value. A bunch of them are one [`Upgrade`](#Upgrade)
+{-| An upgrade for a single function/value/type. A bunch of them are one [`Upgrade`](#Upgrade)
 -}
 type UpgradeSingle
     = Application
@@ -134,17 +146,12 @@ as an [`Upgrade.application`](#application):
             \oldArguments ->
                 case oldArguments of
                     [ onFalseDescriptionArgument, boolArgument ] ->
-                        Upgrade.application
-                            { name = ( "Expect", "equal" )
-                            , arguments =
-                                [ Elm.Syntax.Expression.FunctionOrValue [ "Basics" ] "True"
-                                , boolArgument
-                                ]
-                            }
-                            |> Upgrade.pipeInto
-                                { name = ( "Expect", "onFail" )
-                                , arguments = [ onFalseDescriptionArgument ]
-                                }
+                        Upgrade.call ( "Expect", "equal" )
+                            [ Elm.CodeGen.fqVal [ "Basics" ] "True"
+                            , boolArgument
+                            ]
+                            |> Upgrade.pipeInto ( "Expect", "onFail" )
+                                [ onFalseDescriptionArgument ]
                             |> Just
 
                     _ ->
@@ -388,7 +395,7 @@ type alias TypeUpgradeResources =
     }
 
 
-{-| Rule to upgrade Elm code.
+{-| The rule performing the given [`Upgrade`](#Upgrade)
 -}
 rule : List Upgrade -> Rule
 rule upgrades =

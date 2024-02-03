@@ -4,7 +4,7 @@
 
 What this rule is not for: _simplifying_ your code to use new functions.
 E.g. you added a `YourString.concat` for when you previously used `YourString.join ""` for that.
-(Maybe we're lucky and some day in the distant future a feature like this will come to [`elm-review-simplify`](https://dark.elm.dmy.fr/packages/jfmengels/elm-review-simplify/latest/).)
+(Maybe we're lucky and some day in the distant future a feature like this will come to [`elm-review-simplify`](https://dark.elm.dmy.fr/packages/jfmengels/elm-review-simplify/latest/))
 
 ```elm
 module ReviewConfig exposing (config)
@@ -49,5 +49,5 @@ This rule has your back in cases like these :)
 
 ## not currently supported
 - upgrading variants in any way is not supported because that's usually more involved, transforming patterns and stuff
-- anything that involves more context than just the old function and its arguments to upgrade (e.g. when a function returns a new field and we'd need to adjust type annotations)
+- anything that involves more context than just the old function/type and its arguments to upgrade (e.g. when a function returns a new field and we'd need to adjust type annotations)
 - 👀 something else you'd like to see?
