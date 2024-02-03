@@ -2,7 +2,7 @@
 
 [🔧 `Upgrade`](https://package.elm-lang.org/packages/lue-bird/elm-review-upgrade/1.0.0/Upgrade/ "Provides automatic fixes") reports functions and types that can be upgraded to give users an easy time migrating to a new version of a package or an internal elm API.
 
-What this rule is not for: _simplifying_ your code to use new functions,
+What this rule is not for: _simplifying_ your code to use new functions and types,
 like replacing `YourString.join ""` by your new `YourString.concat`.
 
 ```elm
