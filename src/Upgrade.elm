@@ -249,7 +249,7 @@ pipeInto qualifiedName argumentsExceptTheLastOne =
 
     Upgrade.rule
         [ testVersion1To2
-        , elmCommunityExtraToElmcraftCoreExtra
+        , elmcraftCoreExtraVersion1To2
         , myInternalAPIChange
         ]
 
@@ -261,8 +261,8 @@ pipeInto qualifiedName argumentsExceptTheLastOne =
             , ..etc..
             ]
 
-    elmCommunityExtraToElmcraftCoreExtra : Upgrade
-    elmCommunityExtraToElmcraftCoreExtra =
+    elmcraftCoreExtraVersion1To2 : Upgrade
+    elmcraftCoreExtraVersion1To2 =
         Upgrade.batch [ ... ]
 
     myInternalAPIChange : Upgrade

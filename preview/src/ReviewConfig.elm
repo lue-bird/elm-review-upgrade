@@ -19,7 +19,7 @@ import Upgrade exposing (Upgrade)
 config : List Rule
 config =
     [ Upgrade.rule
-        [ elmCommunityExtraToElmcraftCoreExtra
+        [ elmcraftCoreExtra1To2
         , test1To2
         ]
     ]
@@ -48,8 +48,8 @@ test1To2 =
         |> Upgrade.batch
 
 
-elmCommunityExtraToElmcraftCoreExtra : Upgrade
-elmCommunityExtraToElmcraftCoreExtra =
+elmcraftCoreExtra1To2 : Upgrade
+elmcraftCoreExtra1To2 =
     [ Upgrade.application
         { oldName = ( "Array.Extra", "apply" )
         , oldArgumentNames = [ "functions", "arguments" ]
