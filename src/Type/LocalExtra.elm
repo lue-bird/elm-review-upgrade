@@ -1,4 +1,4 @@
-module Type.LocalExtra exposing (nodeUsedModules, qualify)
+module Type.LocalExtra exposing (nodeUsedModules, qualify, subs, usedModules)
 
 import Elm.Syntax.Node exposing (Node(..))
 import Elm.Syntax.TypeAnnotation
@@ -80,11 +80,11 @@ map typeChange =
 
 nodeUsedModules : Node Elm.Syntax.TypeAnnotation.TypeAnnotation -> Set String
 nodeUsedModules =
-    \(Node _ type_) -> type_ |> typeUsedModules
+    \(Node _ type_) -> type_ |> usedModules
 
 
-typeUsedModules : Elm.Syntax.TypeAnnotation.TypeAnnotation -> Set String
-typeUsedModules =
+usedModules : Elm.Syntax.TypeAnnotation.TypeAnnotation -> Set String
+usedModules =
     \type_ ->
         case type_ of
             Elm.Syntax.TypeAnnotation.GenericType _ ->
@@ -109,3 +109,31 @@ typeUsedModules =
                 arguments
                     |> List.LocalExtra.setUnionMap nodeUsedModules
                     |> Set.insert (moduleName |> ModuleName.fromSyntax)
+
+
+{-| Get all immediate child types of that type
+-}
+subs : Elm.Syntax.TypeAnnotation.TypeAnnotation -> List (Node Elm.Syntax.TypeAnnotation.TypeAnnotation)
+subs =
+    \type_ ->
+        case type_ of
+            Elm.Syntax.TypeAnnotation.Unit ->
+                []
+
+            Elm.Syntax.TypeAnnotation.GenericType _ ->
+                []
+
+            Elm.Syntax.TypeAnnotation.Typed _ typeArguments ->
+                typeArguments
+
+            Elm.Syntax.TypeAnnotation.FunctionTypeAnnotation a b ->
+                [ a, b ]
+
+            Elm.Syntax.TypeAnnotation.Tupled innerTypes ->
+                innerTypes
+
+            Elm.Syntax.TypeAnnotation.Record fields ->
+                fields |> List.map (\(Node _ ( _, value )) -> value)
+
+            Elm.Syntax.TypeAnnotation.GenericRecord _ (Node _ fields) ->
+                fields |> List.map (\(Node _ ( _, value )) -> value)

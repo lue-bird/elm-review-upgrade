@@ -1,13 +1,10 @@
-## TODO
-- upgrading types (see end-in-underscore rule: let funs, fun decls, type alias decls, type decls)
-
 # elm-review-upgrade
 
-[🔧 `Upgrade`](https://package.elm-lang.org/packages/lue-bird/elm-review-upgrade/1.0.0/Upgrade/ "Provides automatic fixes") reports functions that can be upgraded to give users an easy time migrating to a new version of a package or an internal elm API.
+[🔧 `Upgrade`](https://package.elm-lang.org/packages/lue-bird/elm-review-upgrade/1.0.0/Upgrade/ "Provides automatic fixes") reports functions and types that can be upgraded to give users an easy time migrating to a new version of a package or an internal elm API.
 
 What this rule is not for: _simplifying_ your code to use new functions.
 E.g. you added a `YourString.concat` for when you previously used `YourString.join ""` for that.
-(Maybe we're lucky and a feature like this will come to [`elm-review.simplify`](https://dark.elm.dmy.fr/packages/jfmengels/elm-review-simplify/latest/) some day in the distant future.)
+(Maybe we're lucky and some day in the distant future a feature like this will come to [`elm-review-simplify`](https://dark.elm.dmy.fr/packages/jfmengels/elm-review-simplify/latest/).)
 
 ```elm
 module ReviewConfig exposing (config)

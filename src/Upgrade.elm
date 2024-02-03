@@ -1,7 +1,9 @@
 module Upgrade exposing
     ( rule
-    , Upgrade, UpgradeSingle, reference, application, batch
-    , call, pipeInto
+    , Upgrade, UpgradeSingle(..)
+    , reference, application, call, pipeInto
+    , typeReference, type_
+    , batch
     )
 
 {-| Reports when an expression can be simplified.
@@ -29,18 +31,22 @@ module Upgrade exposing
         ]
 
 @docs rule
-@docs Upgrade, UpgradeSingle, reference, application, batch
-@docs call, pipeInto
+@docs Upgrade, UpgradeSingle
+@docs reference, application, call, pipeInto
+@docs typeReference, type_
+@docs batch
 
 -}
 
 import Declaration.LocalExtra
 import Dict exposing (Dict)
+import Elm.CodeGen
 import Elm.Pretty
 import Elm.Syntax.Declaration exposing (Declaration)
 import Elm.Syntax.Expression exposing (Expression)
 import Elm.Syntax.Node exposing (Node(..))
 import Elm.Syntax.Range exposing (Range)
+import Elm.Syntax.TypeAnnotation
 import Expression.LocalExtra
 import Imports exposing (Imports)
 import List.LocalExtra
@@ -55,6 +61,7 @@ import Review.ModuleNameLookupTable exposing (ModuleNameLookupTable)
 import Review.Rule exposing (Error, Rule)
 import Rope exposing (Rope)
 import Set exposing (Set)
+import Type.LocalExtra
 
 
 
@@ -85,6 +92,12 @@ type UpgradeSingle
                         , arguments : List Expression
                         }
                     )
+        }
+    | Type
+        { oldName : ( String, String )
+        , oldArgumentsToNew :
+            List Elm.Syntax.TypeAnnotation.TypeAnnotation
+            -> Maybe Elm.Syntax.TypeAnnotation.TypeAnnotation
         }
 
 
@@ -184,6 +197,70 @@ application :
     -> Upgrade
 application config =
     Rope.singleton (Application config)
+
+
+{-| Flexible [`Upgrade`](#Upgrade) for a transformation of a given type constructor
+to an equivalent type.
+
+For example to do describe the transformation
+
+    Endo from to
+    --> (from -> to) -> from -> to
+
+as a [`Upgrade.type_`](#type_):
+
+    Upgrade.type_
+        { oldName = ( "Endo", "Endo" )
+        , oldArgumentsToNew =
+            \oldArguments ->
+                case oldArguments of
+                    [ from, to ] ->
+                        Elm.CodeGen.funAnn
+                            (Elm.CodeGen.funAnn from to)
+                            (Elm.CodeGen.funAnn from to)
+                            |> Just
+
+                    _ ->
+                        Nothing
+        }
+
+You can use any types in the replacement type.
+To construct these, use [`elm-syntax-dsl`](https://dark.elm.dmy.fr/packages/the-sett/elm-syntax-dsl/latest/)
+or [`elm-syntax`](https://dark.elm.dmy.fr/packages/stil4m/elm-syntax/latest/) directly.
+
+-}
+type_ :
+    { oldName : ( String, String )
+    , oldArgumentsToNew :
+        List Elm.Syntax.TypeAnnotation.TypeAnnotation
+        -> Maybe Elm.Syntax.TypeAnnotation.TypeAnnotation
+    }
+    -> Upgrade
+type_ config =
+    Rope.singleton (Type config)
+
+
+{-| [`Upgrade`](#Upgrade) only the name of the type.
+For example to replace every `Web.ProgramConfig` with `Web.Program.Config`:
+
+    Upgrade.typeReference
+        { old = "Web", "ProgramConfig" )
+        , new = ( "Web.Program", "Config" )
+        }
+
+-}
+typeReference : { old : ( String, String ), new : ( String, String ) } -> Upgrade
+typeReference nameChange =
+    type_
+        { oldName = nameChange.old
+        , oldArgumentsToNew =
+            \oldArguments ->
+                Elm.CodeGen.fqTyped
+                    (nameChange.new |> Tuple.first |> ModuleName.toSyntax)
+                    (nameChange.new |> Tuple.second)
+                    oldArguments
+                    |> Just
+        }
 
 
 {-| Construct an application as the transformed replacement value of an [`Upgrade.application`](Upgrade#application).
@@ -290,7 +367,7 @@ type alias ModuleContext =
     }
 
 
-type alias UpgradeResources =
+type alias ApplicationUpgradeResources =
     { lookupTable : ModuleNameLookupTable
     , imports : Imports
     , extractSourceCode : Range -> String
@@ -302,24 +379,41 @@ type alias UpgradeResources =
     }
 
 
+type alias TypeUpgradeResources =
+    { lookupTable : ModuleNameLookupTable
+    , imports : Imports
+    , moduleBindings : Set String
+    , localBindings : RangeDict (Set String)
+    , arguments : List (Node Elm.Syntax.TypeAnnotation.TypeAnnotation)
+    }
+
+
 {-| Rule to upgrade Elm code.
 -}
 rule : List Upgrade -> Rule
 rule upgrades =
     let
-        upgradeReplacementsByOldName :
+        upgrade : Upgrade
+        upgrade =
+            upgrades |> Rope.fromList |> Rope.concat
+
+        applicationUpgradeReplacementsByOldName :
             Dict
                 ( String, String )
                 { oldArgumentCount : Int
                 , toNew :
-                    UpgradeResources
+                    ApplicationUpgradeResources
                     -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
                 }
-        upgradeReplacementsByOldName =
-            upgrades
-                |> Rope.fromList
-                |> Rope.concat
-                |> upgradeReplacements
+        applicationUpgradeReplacementsByOldName =
+            upgrade |> applicationUpgradeReplacements
+
+        typeUpgradeByOldName :
+            Dict
+                ( String, String )
+                (TypeUpgradeResources -> Maybe { replacement : String, usedModules : Set String })
+        typeUpgradeByOldName =
+            upgrade |> typeUpgradeReplacements
     in
     Review.Rule.newModuleRuleSchemaUsingContextCreator "Upgrade" initialContext
         |> Review.Rule.providesFixesForModuleRule
@@ -337,10 +431,15 @@ rule upgrades =
         |> Review.Rule.withDeclarationListVisitor
             (\declarationList context -> ( [], declarationListVisitor declarationList context ))
         |> Review.Rule.withDeclarationEnterVisitor
-            (\(Node _ declaration) context -> ( [], declarationVisitor declaration context ))
+            (\(Node _ declaration) context -> declarationVisitor declaration typeUpgradeByOldName context)
         |> Review.Rule.withExpressionEnterVisitor
             (\expressionNode context ->
-                expressionNode |> expressionVisitor upgradeReplacementsByOldName context
+                expressionNode
+                    |> expressionVisitor
+                        { application = applicationUpgradeReplacementsByOldName
+                        , type_ = typeUpgradeByOldName
+                        }
+                        context
             )
         |> Review.Rule.withExpressionExitVisitor
             (\node context -> ( [], expressionExitVisitor node context ))
@@ -400,23 +499,6 @@ declarationListVisitor declarationList context =
     }
 
 
-declarationVisitor : Declaration -> ModuleContext -> ModuleContext
-declarationVisitor declarationNode context =
-    case declarationNode of
-        Elm.Syntax.Declaration.FunctionDeclaration functionDeclaration ->
-            { context
-                | rangesToIgnore = RangeDict.empty
-                , localBindings =
-                    RangeDict.one
-                        ( functionDeclaration.declaration |> Elm.Syntax.Node.range
-                        , functionDeclaration.declaration |> Elm.Syntax.Node.value |> .arguments |> Pattern.LocalExtra.listBindings
-                        )
-            }
-
-        _ ->
-            context
-
-
 {-| Put a `ModuleName` and thing name together as a string.
 If desired, call in combination with `Qualification.inContext`
 -}
@@ -430,14 +512,152 @@ qualifiedToString ( moduleName, unqualifiedName ) =
             [ existingModuleName, ".", unqualifiedName ] |> String.concat
 
 
-expressionVisitor :
+modulesToImportsString : Set String -> String
+modulesToImportsString =
+    \modulesToImport ->
+        modulesToImport
+            |> Set.remove ""
+            |> Set.toList
+            |> List.concatMap (\moduleName -> [ "import ", moduleName, "\n" ])
+            |> String.concat
+
+
+typeUpgradePerform :
     Dict
         ( String, String )
-        { oldArgumentCount : Int
-        , toNew :
-            UpgradeResources
-            -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
-        }
+        (TypeUpgradeResources -> Maybe { replacement : String, usedModules : Set String })
+    -> ModuleContext
+    ->
+        (Node Elm.Syntax.TypeAnnotation.TypeAnnotation
+         -> List (Review.Rule.Error {})
+        )
+typeUpgradePerform upgradeByOldName context =
+    -- IGNORE TCO
+    \typeToUpgrade ->
+        case typeToUpgrade of
+            Node typeRange (Elm.Syntax.TypeAnnotation.Typed (Node referenceRange ( _, unqualifiedName )) arguments) ->
+                case Review.ModuleNameLookupTable.moduleNameAt context.lookupTable referenceRange of
+                    Nothing ->
+                        []
+
+                    Just moduleName ->
+                        let
+                            oldName : ( String, String )
+                            oldName =
+                                ( moduleName |> ModuleName.fromSyntax, unqualifiedName )
+                        in
+                        case upgradeByOldName |> Dict.get oldName of
+                            Nothing ->
+                                []
+
+                            Just upgradeToPerform ->
+                                let
+                                    maybeUpgraded : Maybe { replacement : String, usedModules : Set String }
+                                    maybeUpgraded =
+                                        upgradeToPerform
+                                            { lookupTable = context.lookupTable
+                                            , moduleBindings = context.moduleBindings
+                                            , localBindings = context.localBindings
+                                            , imports = context.imports
+                                            , arguments = arguments
+                                            }
+                                in
+                                case maybeUpgraded of
+                                    Nothing ->
+                                        []
+
+                                    Just upgraded ->
+                                        [ Review.Rule.errorWithFix
+                                            { message =
+                                                (oldName
+                                                    |> Qualification.inContext Qualification.defaultContext
+                                                    |> qualifiedToString
+                                                )
+                                                    ++ " can be upgraded"
+                                            , details =
+                                                [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
+                                                ]
+                                            }
+                                            referenceRange
+                                            [ Review.Fix.replaceRangeBy typeRange upgraded.replacement
+                                            , Review.Fix.insertAt { row = context.importRow, column = 1 }
+                                                (Set.diff upgraded.usedModules
+                                                    (context.imports |> Dict.keys |> Set.fromList)
+                                                    |> modulesToImportsString
+                                                )
+                                            ]
+                                        ]
+
+            Node _ otherType ->
+                otherType
+                    |> Type.LocalExtra.subs
+                    |> List.concatMap
+                        (typeUpgradePerform upgradeByOldName context)
+
+
+declarationVisitor :
+    Declaration
+    ->
+        Dict
+            ( String, String )
+            (TypeUpgradeResources -> Maybe { replacement : String, usedModules : Set String })
+    -> ModuleContext
+    -> ( List (Review.Rule.Error {}), ModuleContext )
+declarationVisitor declaration typeUpgradeByOldName context =
+    case declaration of
+        Elm.Syntax.Declaration.FunctionDeclaration functionDeclaration ->
+            ( case functionDeclaration.signature of
+                Nothing ->
+                    []
+
+                Just (Node _ signature) ->
+                    signature.typeAnnotation
+                        |> typeUpgradePerform typeUpgradeByOldName context
+            , { context
+                | rangesToIgnore = RangeDict.empty
+                , localBindings =
+                    RangeDict.one
+                        ( functionDeclaration.declaration |> Elm.Syntax.Node.range
+                        , functionDeclaration.declaration |> Elm.Syntax.Node.value |> .arguments |> Pattern.LocalExtra.listBindings
+                        )
+              }
+            )
+
+        Elm.Syntax.Declaration.AliasDeclaration typeAliasDeclaration ->
+            ( typeAliasDeclaration.typeAnnotation
+                |> typeUpgradePerform typeUpgradeByOldName context
+            , context
+            )
+
+        Elm.Syntax.Declaration.CustomTypeDeclaration choiceTypeDeclaration ->
+            ( choiceTypeDeclaration.constructors
+                |> List.concatMap
+                    (\(Node _ variant) ->
+                        variant.arguments
+                            |> List.concatMap
+                                (typeUpgradePerform typeUpgradeByOldName context)
+                    )
+            , context
+            )
+
+        _ ->
+            ( [], context )
+
+
+expressionVisitor :
+    { application :
+        Dict
+            ( String, String )
+            { oldArgumentCount : Int
+            , toNew :
+                ApplicationUpgradeResources
+                -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
+            }
+    , type_ :
+        Dict
+            ( String, String )
+            (TypeUpgradeResources -> Maybe { replacement : String, usedModules : Set String })
+    }
     -> ModuleContext
     ->
         (Node Expression
@@ -469,14 +689,13 @@ expressionVisitor upgrade context =
                         context.branchLocalBindings
                         (expression |> Expression.LocalExtra.branchLocalBindings)
 
-                contextWithInferredConstantsAndLocalBindings : ModuleContext
-                contextWithInferredConstantsAndLocalBindings =
+                contextWithLocalBindings : ModuleContext
+                contextWithLocalBindings =
                     case RangeDict.get expressionRange context.branchLocalBindings of
                         Nothing ->
                             { context
                                 | localBindings = withExpressionSurfaceBindings
-                                , branchLocalBindings =
-                                    withNewBranchLocalBindings
+                                , branchLocalBindings = withNewBranchLocalBindings
                             }
 
                         Just currentBranchLocalBindings ->
@@ -486,71 +705,78 @@ expressionVisitor upgrade context =
                                 , branchLocalBindings =
                                     withNewBranchLocalBindings |> RangeDict.remove expressionRange
                             }
-
-                upgradePerformed :
-                    Maybe
-                        { name : ( String, String )
-                        , referenceRange : Range
-                        , range : Range
-                        , replacement : String
-                        , replacementDescription : String
-                        , usedModules : Set String
-                        }
-                upgradePerformed =
-                    expressionNode |> expressionUpgradePerform upgrade contextWithInferredConstantsAndLocalBindings
             in
-            case upgradePerformed of
-                Nothing ->
-                    ( [], contextWithInferredConstantsAndLocalBindings )
+            case expressionNode |> Expression.LocalExtra.toReferenceOrApplication of
+                Just referenceOrApplication ->
+                    case referenceOrApplication |> applicationUpgradePerform upgrade.application contextWithLocalBindings of
+                        Nothing ->
+                            ( [], contextWithLocalBindings )
 
-                Just successfulUpgrade ->
-                    ( [ Review.Rule.errorWithFix
-                            { message =
-                                [ successfulUpgrade.name |> Qualification.inContext Qualification.defaultContext |> qualifiedToString
-                                , " can be upgraded to "
-                                , successfulUpgrade.replacementDescription
-                                ]
-                                    |> String.concat
-                            , details =
-                                [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
-                                ]
-                            }
-                            successfulUpgrade.referenceRange
-                            [ Review.Fix.replaceRangeBy
-                                successfulUpgrade.range
-                                successfulUpgrade.replacement
-                            , let
-                                modulesToImport : Set String
-                                modulesToImport =
-                                    Set.diff successfulUpgrade.usedModules
-                                        (context.imports |> Dict.keys |> Set.fromList)
-                              in
-                              Review.Fix.insertAt { row = context.importRow, column = 1 }
-                                (modulesToImport
-                                    |> Set.remove ""
-                                    |> Set.toList
-                                    |> List.concatMap (\moduleName -> [ "import ", moduleName, "\n" ])
-                                    |> String.concat
-                                )
-                            ]
-                      ]
-                    , { contextWithInferredConstantsAndLocalBindings
-                        | rangesToIgnore = context.rangesToIgnore |> RangeDict.insert ( successfulUpgrade.range, () )
-                      }
+                        Just successfulUpgrade ->
+                            ( [ Review.Rule.errorWithFix
+                                    { message =
+                                        [ successfulUpgrade.name |> Qualification.inContext Qualification.defaultContext |> qualifiedToString
+                                        , " can be upgraded to "
+                                        , successfulUpgrade.replacementDescription
+                                        ]
+                                            |> String.concat
+                                    , details =
+                                        [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
+                                        ]
+                                    }
+                                    successfulUpgrade.referenceRange
+                                    [ Review.Fix.replaceRangeBy
+                                        successfulUpgrade.range
+                                        successfulUpgrade.replacement
+                                    , Review.Fix.insertAt { row = context.importRow, column = 1 }
+                                        (Set.diff successfulUpgrade.usedModules
+                                            (context.imports |> Dict.keys |> Set.fromList)
+                                            |> modulesToImportsString
+                                        )
+                                    ]
+                              ]
+                            , { contextWithLocalBindings
+                                | rangesToIgnore = context.rangesToIgnore |> RangeDict.insert ( successfulUpgrade.range, () )
+                              }
+                            )
+
+                Nothing ->
+                    ( case expression of
+                        Elm.Syntax.Expression.LetExpression letIn ->
+                            letIn.declarations
+                                |> List.concatMap
+                                    (\(Node _ letDeclaration) ->
+                                        case letDeclaration of
+                                            Elm.Syntax.Expression.LetDestructuring _ _ ->
+                                                []
+
+                                            Elm.Syntax.Expression.LetFunction letValueOrFunctionDeclaration ->
+                                                case letValueOrFunctionDeclaration.signature of
+                                                    Nothing ->
+                                                        []
+
+                                                    Just (Node _ signature) ->
+                                                        signature.typeAnnotation
+                                                            |> typeUpgradePerform upgrade.type_ context
+                                    )
+
+                        _ ->
+                            []
+                    , contextWithLocalBindings
                     )
 
 
-expressionUpgradePerform :
+applicationUpgradePerform :
     Dict
         ( String, String )
         { oldArgumentCount : Int
         , toNew :
-            UpgradeResources
+            ApplicationUpgradeResources
             -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
         }
     -> ModuleContext
     ->
-        (Node Expression
+        ({ range : Range, name : String, referenceRange : Range, arguments : List (Node Expression) }
          ->
             Maybe
                 { name : ( String, String )
@@ -561,62 +787,57 @@ expressionUpgradePerform :
                 , usedModules : Set String
                 }
         )
-expressionUpgradePerform upgrade context =
-    \expressionNode ->
-        case expressionNode |> Expression.LocalExtra.toReferenceOrApplication of
+applicationUpgradePerform upgrade context =
+    \referenceOrApplication ->
+        case Review.ModuleNameLookupTable.moduleNameAt context.lookupTable referenceOrApplication.referenceRange of
             Nothing ->
                 Nothing
 
-            Just referenceOrApplication ->
-                case Review.ModuleNameLookupTable.moduleNameAt context.lookupTable referenceOrApplication.referenceRange of
+            Just moduleName ->
+                case Dict.get ( moduleName |> ModuleName.fromSyntax, referenceOrApplication.name ) upgrade of
                     Nothing ->
                         Nothing
 
-                    Just moduleName ->
-                        case Dict.get ( moduleName |> ModuleName.fromSyntax, referenceOrApplication.name ) upgrade of
-                            Nothing ->
-                                Nothing
+                    Just upgradeForName ->
+                        let
+                            range : Range
+                            range =
+                                case List.drop (upgradeForName.oldArgumentCount - 1) referenceOrApplication.arguments of
+                                    lastExpectedArg :: _ :: _ ->
+                                        -- extra arguments so we'll update the range to drop the extra ones
+                                        { start = referenceOrApplication.referenceRange.start, end = (Elm.Syntax.Node.range lastExpectedArg).end }
 
-                            Just upgradeForName ->
-                                let
-                                    range : Range
-                                    range =
-                                        case List.drop (upgradeForName.oldArgumentCount - 1) referenceOrApplication.arguments of
-                                            lastExpectedArg :: _ :: _ ->
-                                                -- extra arguments so we'll update the range to drop the extra ones
-                                                { start = referenceOrApplication.referenceRange.start, end = (Elm.Syntax.Node.range lastExpectedArg).end }
+                                    _ ->
+                                        referenceOrApplication.range
 
-                                            _ ->
-                                                expressionNode |> Elm.Syntax.Node.range
+                            arguments : List (Node Expression)
+                            arguments =
+                                -- drop the extra arguments
+                                List.take upgradeForName.oldArgumentCount referenceOrApplication.arguments
 
-                                    arguments : List (Node Expression)
-                                    arguments =
-                                        -- drop the extra arguments
-                                        List.take upgradeForName.oldArgumentCount referenceOrApplication.arguments
-
-                                    upgradeResources : UpgradeResources
-                                    upgradeResources =
-                                        { lookupTable = context.lookupTable
-                                        , extractSourceCode = context.extractSourceCode
-                                        , imports = context.imports
-                                        , moduleBindings = context.moduleBindings
-                                        , localBindings = context.localBindings
-                                        , range = range
-                                        , referenceRange = referenceOrApplication.referenceRange
-                                        , arguments = arguments
-                                        }
-                                in
-                                upgradeForName.toNew upgradeResources
-                                    |> Maybe.map
-                                        (\replacement ->
-                                            { name = ( moduleName |> ModuleName.fromSyntax, referenceOrApplication.name )
-                                            , referenceRange = referenceOrApplication.referenceRange
-                                            , range = range
-                                            , replacement = replacement.replacement
-                                            , replacementDescription = replacement.replacementDescription
-                                            , usedModules = replacement.usedModules
-                                            }
-                                        )
+                            upgradeResources : ApplicationUpgradeResources
+                            upgradeResources =
+                                { lookupTable = context.lookupTable
+                                , extractSourceCode = context.extractSourceCode
+                                , imports = context.imports
+                                , moduleBindings = context.moduleBindings
+                                , localBindings = context.localBindings
+                                , range = range
+                                , referenceRange = referenceOrApplication.referenceRange
+                                , arguments = arguments
+                                }
+                        in
+                        upgradeForName.toNew upgradeResources
+                            |> Maybe.map
+                                (\replacement ->
+                                    { name = ( moduleName |> ModuleName.fromSyntax, referenceOrApplication.name )
+                                    , referenceRange = referenceOrApplication.referenceRange
+                                    , range = range
+                                    , replacement = replacement.replacement
+                                    , replacementDescription = replacement.replacementDescription
+                                    , usedModules = replacement.usedModules
+                                    }
+                                )
 
 
 rangeContainsLocation : Elm.Syntax.Range.Location -> Range -> Bool
@@ -645,39 +866,30 @@ expressionExitVisitor (Node expressionRange _) context =
         }
 
 
-upgradeReplacements :
+applicationUpgradeReplacements :
     Upgrade
     ->
         Dict
             ( String, String )
             { oldArgumentCount : Int
             , toNew :
-                UpgradeResources
+                ApplicationUpgradeResources
                 -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
             }
-upgradeReplacements upgrade =
-    upgrade
-        |> Rope.toList
-        |> List.map
-            (\upgradeSingle ->
-                let
-                    singleReplacement :
-                        { oldName : ( String, String )
-                        , oldArgumentCount : Int
-                        , toNew :
-                            UpgradeResources
-                            -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
-                        }
-                    singleReplacement =
-                        upgradeSingle |> upgradeSingleReplacement
-                in
-                ( singleReplacement.oldName
-                , { oldArgumentCount = singleReplacement.oldArgumentCount
-                  , toNew = singleReplacement.toNew
-                  }
+applicationUpgradeReplacements =
+    \upgrade ->
+        upgrade
+            |> Rope.toList
+            |> List.filterMap upgradeSingleToApplicationReplacement
+            |> List.map
+                (\singleReplacement ->
+                    ( singleReplacement.oldName
+                    , { oldArgumentCount = singleReplacement.oldArgumentCount
+                      , toNew = singleReplacement.toNew
+                      }
+                    )
                 )
-            )
-        |> Dict.fromList
+            |> Dict.fromList
 
 
 addIndentation : Int -> (String -> String)
@@ -689,18 +901,22 @@ addIndentation additionalIndentationLevel =
             |> String.join "\n"
 
 
-upgradeSingleReplacement :
+upgradeSingleToApplicationReplacement :
     UpgradeSingle
     ->
-        { oldName : ( String, String )
-        , oldArgumentCount : Int
-        , toNew :
-            UpgradeResources
-            -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
-        }
-upgradeSingleReplacement =
+        Maybe
+            { oldName : ( String, String )
+            , oldArgumentCount : Int
+            , toNew :
+                ApplicationUpgradeResources
+                -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
+            }
+upgradeSingleToApplicationReplacement =
     \upgradeSingle ->
         case upgradeSingle of
+            Type _ ->
+                Nothing
+
             Application applicationUpgrade ->
                 { oldName = applicationUpgrade.oldName
                 , oldArgumentCount = applicationUpgrade.oldArgumentNames |> List.length
@@ -812,6 +1028,7 @@ upgradeSingleReplacement =
                                 }
                                     |> Just
                 }
+                    |> Just
 
 
 toLambdaOrParenthesizedStringWithArgumentsMultiline : { argumentNames : List String, returnedString : String } -> String
@@ -878,3 +1095,58 @@ disambiguateFromBindingsInScope resources baseName =
 
     else
         baseName
+
+
+typeUpgradeReplacements :
+    Upgrade
+    ->
+        Dict
+            ( String, String )
+            (TypeUpgradeResources
+             -> Maybe { replacement : String, usedModules : Set String }
+            )
+typeUpgradeReplacements =
+    \upgrade ->
+        upgrade
+            |> Rope.toList
+            |> List.filterMap upgradeSingleToTypeReplacement
+            |> List.map
+                (\singleReplacement ->
+                    ( singleReplacement.oldName, singleReplacement.toNew )
+                )
+            |> Dict.fromList
+
+
+upgradeSingleToTypeReplacement :
+    UpgradeSingle
+    ->
+        Maybe
+            { oldName : ( String, String )
+            , toNew :
+                TypeUpgradeResources
+                -> Maybe { replacement : String, usedModules : Set String }
+            }
+upgradeSingleToTypeReplacement upgradeSingle =
+    case upgradeSingle of
+        Application _ ->
+            Nothing
+
+        Type typeUpgrade ->
+            { oldName = typeUpgrade.oldName
+            , toNew =
+                \upgradeResources ->
+                    case typeUpgrade.oldArgumentsToNew (upgradeResources.arguments |> List.map Elm.Syntax.Node.value) of
+                        Nothing ->
+                            Nothing
+
+                        Just new ->
+                            { usedModules = new |> Type.LocalExtra.usedModules
+                            , replacement =
+                                new
+                                    |> Type.LocalExtra.qualify upgradeResources
+                                    |> Elm.Pretty.prettyTypeAnnotation
+                                    |> Pretty.pretty 1000
+                            }
+                                |> Just
+            }
+                |> Just
