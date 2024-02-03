@@ -6,8 +6,6 @@ What this rule is not for: _simplifying_ your code to use new functions,
 like replacing `YourString.join ""` by your new `YourString.concat`.
 
 ```elm
-module ReviewConfig exposing (config)
-
 import Review.Rule
 import Upgrade
 import Elm.CodeGen -- the-sett/elm-syntax-dsl
