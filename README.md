@@ -37,7 +37,7 @@ config =
 Writing custom elm-review rules for every version upgrade yourself will get tricky.
 A few examples:
 - Is the function curried or part of a composition or pipeline? If it is, do transformations like reversing the argument order still work?
-- Does the new module name have an import alias or is exposed? If it is exposed, is it shadowed? Does it need new imports?
+- How do we unify your replacement code with our import aliases and exposings and shadowed exposings? Do we need new imports?
 - When changing the argument order, should we keep the formatting of the arguments?
 - How do you ensure that the fix indentation doesn't interfere with previous `let` declarations, `if` branches or cases?
 
