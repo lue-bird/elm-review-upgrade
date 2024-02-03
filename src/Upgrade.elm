@@ -385,7 +385,14 @@ rule upgrades =
         typeUpgradeByOldName :
             Dict
                 ( String, String )
-                (TypeUpgradeResources -> Maybe { replacement : String, usedModules : Set String })
+                (TypeUpgradeResources
+                 ->
+                    Maybe
+                        { replacement : String
+                        , replacementDescription : String
+                        , usedModules : Set String
+                        }
+                )
         typeUpgradeByOldName =
             upgrade |> typeUpgradeReplacements
     in
@@ -473,6 +480,16 @@ declarationListVisitor declarationList context =
     }
 
 
+modulesToImportsString : Set String -> String
+modulesToImportsString =
+    \modulesToImport ->
+        modulesToImport
+            |> Set.remove ""
+            |> Set.toList
+            |> List.concatMap (\moduleName -> [ "import ", moduleName, "\n" ])
+            |> String.concat
+
+
 {-| Put a `ModuleName` and thing name together as a string.
 If desired, call in combination with `Qualification.inContext`
 -}
@@ -486,20 +503,17 @@ qualifiedToString ( moduleName, unqualifiedName ) =
             [ existingModuleName, ".", unqualifiedName ] |> String.concat
 
 
-modulesToImportsString : Set String -> String
-modulesToImportsString =
-    \modulesToImport ->
-        modulesToImport
-            |> Set.remove ""
-            |> Set.toList
-            |> List.concatMap (\moduleName -> [ "import ", moduleName, "\n" ])
-            |> String.concat
-
-
 typeUpgradePerform :
     Dict
         ( String, String )
-        (TypeUpgradeResources -> Maybe { replacement : String, usedModules : Set String })
+        (TypeUpgradeResources
+         ->
+            Maybe
+                { replacement : String
+                , replacementDescription : String
+                , usedModules : Set String
+                }
+        )
     -> ModuleContext
     ->
         (Node Elm.Syntax.TypeAnnotation.TypeAnnotation
@@ -526,7 +540,7 @@ typeUpgradePerform upgradeByOldName context =
 
                             Just upgradeToPerform ->
                                 let
-                                    maybeUpgraded : Maybe { replacement : String, usedModules : Set String }
+                                    maybeUpgraded : Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
                                     maybeUpgraded =
                                         upgradeToPerform
                                             { lookupTable = context.lookupTable
@@ -543,11 +557,13 @@ typeUpgradePerform upgradeByOldName context =
                                     Just upgraded ->
                                         [ Review.Rule.errorWithFix
                                             { message =
-                                                (oldName
+                                                [ oldName
                                                     |> Qualification.inContext Qualification.defaultContext
                                                     |> qualifiedToString
-                                                )
-                                                    ++ " can be upgraded"
+                                                , " can be upgraded to "
+                                                , upgraded.replacementDescription
+                                                ]
+                                                    |> String.concat
                                             , details =
                                                 [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
                                                 ]
@@ -574,7 +590,14 @@ declarationVisitor :
     ->
         Dict
             ( String, String )
-            (TypeUpgradeResources -> Maybe { replacement : String, usedModules : Set String })
+            (TypeUpgradeResources
+             ->
+                Maybe
+                    { replacement : String
+                    , replacementDescription : String
+                    , usedModules : Set String
+                    }
+            )
     -> ModuleContext
     -> ( List (Review.Rule.Error {}), ModuleContext )
 declarationVisitor declaration typeUpgradeByOldName context =
@@ -625,12 +648,24 @@ expressionVisitor :
             { oldArgumentCount : Int
             , toNew :
                 ApplicationUpgradeResources
-                -> Maybe { replacement : String, replacementDescription : String, usedModules : Set String }
+                ->
+                    Maybe
+                        { replacement : String
+                        , replacementDescription : String
+                        , usedModules : Set String
+                        }
             }
     , type_ :
         Dict
             ( String, String )
-            (TypeUpgradeResources -> Maybe { replacement : String, usedModules : Set String })
+            (TypeUpgradeResources
+             ->
+                Maybe
+                    { replacement : String
+                    , replacementDescription : String
+                    , usedModules : Set String
+                    }
+            )
     }
     -> ModuleContext
     ->
@@ -1077,7 +1112,12 @@ typeUpgradeReplacements :
         Dict
             ( String, String )
             (TypeUpgradeResources
-             -> Maybe { replacement : String, usedModules : Set String }
+             ->
+                Maybe
+                    { replacement : String
+                    , replacementDescription : String
+                    , usedModules : Set String
+                    }
             )
 typeUpgradeReplacements =
     \upgrade ->
@@ -1098,7 +1138,12 @@ upgradeSingleToTypeReplacement :
             { oldName : ( String, String )
             , toNew :
                 TypeUpgradeResources
-                -> Maybe { replacement : String, usedModules : Set String }
+                ->
+                    Maybe
+                        { replacement : String
+                        , replacementDescription : String
+                        , usedModules : Set String
+                        }
             }
 upgradeSingleToTypeReplacement upgradeSingle =
     case upgradeSingle of
@@ -1120,7 +1165,35 @@ upgradeSingleToTypeReplacement upgradeSingle =
                                     |> Type.LocalExtra.qualify upgradeResources
                                     |> Elm.Pretty.prettyTypeAnnotation
                                     |> Pretty.pretty 1000
+                            , replacementDescription =
+                                new |> typeSimpleDescription
                             }
                                 |> Just
             }
                 |> Just
+
+
+typeSimpleDescription : Elm.Syntax.TypeAnnotation.TypeAnnotation -> String
+typeSimpleDescription =
+    \typeToDescribe ->
+        case typeToDescribe of
+            Elm.Syntax.TypeAnnotation.GenericType _ ->
+                "a type variable"
+
+            Elm.Syntax.TypeAnnotation.Typed (Node _ ( syntaxModuleName, unqualifiedName )) _ ->
+                ( syntaxModuleName |> ModuleName.fromSyntax, unqualifiedName ) |> qualifiedToString
+
+            Elm.Syntax.TypeAnnotation.Unit ->
+                "()"
+
+            Elm.Syntax.TypeAnnotation.Tupled parts ->
+                [ "a ", parts |> List.length |> String.fromInt, "-tuple type" ] |> String.concat
+
+            Elm.Syntax.TypeAnnotation.Record _ ->
+                "a record type"
+
+            Elm.Syntax.TypeAnnotation.GenericRecord _ _ ->
+                "an extensible record type"
+
+            Elm.Syntax.TypeAnnotation.FunctionTypeAnnotation _ _ ->
+                "a function type"

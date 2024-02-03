@@ -170,7 +170,7 @@ a = a
                         )
                     |> Review.Test.expectErrors
                         [ Review.Test.error
-                            { message = "Web.ProgramConfig can be upgraded"
+                            { message = "Web.ProgramConfig can be upgraded to Web.Program.Config"
                             , details =
                                 [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
                                 ]
@@ -206,7 +206,7 @@ a =
                         )
                     |> Review.Test.expectErrors
                         [ Review.Test.error
-                            { message = "Web.ProgramConfig can be upgraded"
+                            { message = "Web.ProgramConfig can be upgraded to Web.Program.Config"
                             , details =
                                 [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
                                 ]
@@ -244,7 +244,7 @@ a = a
                         )
                     |> Review.Test.expectErrors
                         [ Review.Test.error
-                            { message = "Web.ProgramConfig can be upgraded"
+                            { message = "Web.ProgramConfig can be upgraded to Web.Program.Config"
                             , details =
                                 [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
                                 ]
@@ -279,7 +279,7 @@ a = a
                         )
                     |> Review.Test.expectErrors
                         [ Review.Test.error
-                            { message = "Web.ProgramConfig can be upgraded"
+                            { message = "Web.ProgramConfig can be upgraded to Web.Program.Config"
                             , details =
                                 [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
                                 ]
@@ -322,7 +322,7 @@ a = a
                         )
                     |> Review.Test.expectErrors
                         [ Review.Test.error
-                            { message = "Map.Mapping can be upgraded"
+                            { message = "Map.Mapping can be upgraded to a function type"
                             , details =
                                 [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
                                 ]
