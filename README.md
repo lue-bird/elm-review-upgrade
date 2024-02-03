@@ -38,6 +38,7 @@ config =
         ]
     ]
 ```
+([full examples of test 1→2 and elmcraft/core-extra 1→2](https://github.com/lue-bird/elm-review-upgrade/blob/main/preview/src/ReviewConfig.elm))
 
 Writing custom elm-review rules for every version upgrade yourself will get tricky.
 A few examples:
