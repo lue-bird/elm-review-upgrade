@@ -1,9 +1,7 @@
 module Upgrade exposing
-    ( rule
-    , Upgrade
+    ( rule, Upgrade, batch
     , reference, application, call, pipeInto, ReplacementPipeline
     , typeReference, type_
-    , batch
     , UpgradeSingle(..)
     )
 
@@ -31,11 +29,17 @@ module Upgrade exposing
             ]
         ]
 
-@docs rule
-@docs Upgrade
+@docs rule, Upgrade, batch
+
+
+## function/value
+
 @docs reference, application, call, pipeInto, ReplacementPipeline
+
+
+## type
+
 @docs typeReference, type_
-@docs batch
 
 
 ## safe internals
