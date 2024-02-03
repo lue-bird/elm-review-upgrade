@@ -19,8 +19,7 @@ import Upgrade exposing (Upgrade)
 config : List Rule
 config =
     [ Upgrade.rule
-        [ elmcraftCoreExtra1To2
-        , test1To2
+        [ test1To2
         ]
     ]
 
