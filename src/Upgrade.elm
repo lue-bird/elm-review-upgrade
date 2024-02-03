@@ -1,7 +1,7 @@
 module Upgrade exposing
     ( rule
     , Upgrade
-    , reference, application, call, pipeInto
+    , reference, application, call, pipeInto, ReplacementPipeline
     , typeReference, type_
     , batch
     , UpgradeSingle(..)
@@ -33,7 +33,7 @@ module Upgrade exposing
 
 @docs rule
 @docs Upgrade
-@docs reference, application, call, pipeInto
+@docs reference, application, call, pipeInto, ReplacementPipeline
 @docs typeReference, type_
 @docs batch
 
@@ -92,18 +92,7 @@ type UpgradeSingle
     = Application
         { oldName : ( String, String )
         , oldArgumentNames : List String
-        , oldArgumentsToNew :
-            List Expression
-            ->
-                Maybe
-                    ( { name : ( String, String )
-                      , arguments : List Expression
-                      }
-                    , List
-                        { name : ( String, String )
-                        , arguments : List Expression
-                        }
-                    )
+        , oldArgumentsToNew : List Expression -> Maybe ReplacementPipeline
         }
     | Type
         { oldName : ( String, String )
@@ -111,6 +100,20 @@ type UpgradeSingle
             List Elm.Syntax.TypeAnnotation.TypeAnnotation
             -> Maybe Elm.Syntax.TypeAnnotation.TypeAnnotation
         }
+
+
+{-| A bunch of functions run in sequence after an initial call.
+Use [`call`](#call) to start one and [`pipeInto`](#pipeInto) to `|>` it further.
+-}
+type alias ReplacementPipeline =
+    ( { name : ( String, String )
+      , arguments : List Expression
+      }
+    , List
+        { name : ( String, String )
+        , arguments : List Expression
+        }
+    )
 
 
 {-| [`Upgrade`](#Upgrade) only the name of the value/function.
@@ -132,7 +135,7 @@ reference nameChange =
 {-| Flexible [`Upgrade`](#Upgrade) for a transformation from usage of a given function/value reference
 to a [pipeline](#pipeInto) or a [call](#call).
 
-For example to do describe the transformation
+For example to describe the transformation
 
     Expect.true onFalseDescription actualBool
     --> Expect.equal True actualBool |> Expect.onFail onFalseDescription
@@ -158,7 +161,7 @@ as an [`Upgrade.application`](#application):
                         Nothing
         }
 
-Here's another example to change
+Here's another example:
 
     Array.Extra.call funs arguments
     --> Array.Extra.andMap arguments funs
@@ -188,18 +191,7 @@ or [`elm-syntax`](https://dark.elm.dmy.fr/packages/stil4m/elm-syntax/latest/) di
 application :
     { oldName : ( String, String )
     , oldArgumentNames : List String
-    , oldArgumentsToNew :
-        List Expression
-        ->
-            Maybe
-                ( { name : ( String, String )
-                  , arguments : List Expression
-                  }
-                , List
-                    { name : ( String, String )
-                    , arguments : List Expression
-                    }
-                )
+    , oldArgumentsToNew : List Expression -> Maybe ReplacementPipeline
     }
     -> Upgrade
 application config =
@@ -273,18 +265,7 @@ typeReference nameChange =
 {-| Construct an application as the transformed replacement value of an [`Upgrade.application`](Upgrade#application).
 Use [`pipeInto`](#pipeInto) if you want to use its result as the input of a pipeline.
 -}
-call :
-    ( String, String )
-    -> List Expression
-    ->
-        ( { name : ( String, String )
-          , arguments : List Expression
-          }
-        , List
-            { name : ( String, String )
-            , arguments : List Expression
-            }
-        )
+call : ( String, String ) -> List Expression -> ReplacementPipeline
 call qualifiedName arguments =
     ( { name = qualifiedName, arguments = arguments }, [] )
 
@@ -303,25 +284,7 @@ For example to get
 pipeInto :
     ( String, String )
     -> List Expression
-    ->
-        (( { name : ( String, String )
-           , arguments : List Expression
-           }
-         , List
-            { name : ( String, String )
-            , arguments : List Expression
-            }
-         )
-         ->
-            ( { name : ( String, String )
-              , arguments : List Expression
-              }
-            , List
-                { name : ( String, String )
-                , arguments : List Expression
-                }
-            )
-        )
+    -> (ReplacementPipeline -> ReplacementPipeline)
 pipeInto qualifiedName argumentsExceptTheLastOne =
     \pipelineSoFar ->
         pipelineSoFar
