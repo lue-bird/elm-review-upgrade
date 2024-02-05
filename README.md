@@ -32,7 +32,7 @@ config =
         ]
     ]
 ```
-([full examples of test 1→2 and elmcraft/core-extra 1→2](https://github.com/lue-bird/elm-review-upgrade/blob/main/preview/))
+(full examples of [test 1→2](https://github.com/lue-bird/elm-review-upgrade/blob/main/example/elmcraft-core-extra-1-to-2) and [elmcraft/core-extra 1→2](https://github.com/elmcraft/core-extra/tree/master/upgrade))
 
 Writing custom elm-review rules for every version upgrade yourself will get tricky.
 A few examples:
