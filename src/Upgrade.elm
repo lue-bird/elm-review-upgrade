@@ -1314,10 +1314,22 @@ upgradeSingleToTypeReplacement upgradeSingle =
                         Just new ->
                             { usedModules = new |> Type.LocalExtra.usedModules
                             , replacement =
-                                new
-                                    |> Type.LocalExtra.qualify upgradeResources
-                                    |> Elm.Pretty.prettyTypeAnnotation
-                                    |> Pretty.pretty 1000
+                                let
+                                    qualifiedNewType : Elm.Syntax.TypeAnnotation.TypeAnnotation
+                                    qualifiedNewType =
+                                        new |> Type.LocalExtra.qualify upgradeResources
+
+                                    qualifiedNewTypeStringWithoutParens : String
+                                    qualifiedNewTypeStringWithoutParens =
+                                        qualifiedNewType
+                                            |> Elm.Pretty.prettyTypeAnnotation
+                                            |> Pretty.pretty 1000
+                                in
+                                if qualifiedNewType |> Type.LocalExtra.needsParens then
+                                    [ "(", qualifiedNewTypeStringWithoutParens, ")" ] |> String.concat
+
+                                else
+                                    qualifiedNewTypeStringWithoutParens
                             , replacementDescription =
                                 new |> typeSimpleDescription
                             }

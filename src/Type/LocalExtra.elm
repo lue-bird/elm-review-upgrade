@@ -1,4 +1,4 @@
-module Type.LocalExtra exposing (nodeReferences, qualify, subs, usedModules)
+module Type.LocalExtra exposing (needsParens, nodeReferences, qualify, subs, usedModules)
 
 import Elm.Syntax.Node exposing (Node(..))
 import Elm.Syntax.TypeAnnotation
@@ -146,3 +146,34 @@ subs =
 
             Elm.Syntax.TypeAnnotation.GenericRecord _ (Node _ fields) ->
                 fields |> List.map (\(Node _ ( _, value )) -> value)
+
+
+needsParens : Elm.Syntax.TypeAnnotation.TypeAnnotation -> Bool
+needsParens =
+    \type_ ->
+        case type_ of
+            Elm.Syntax.TypeAnnotation.Unit ->
+                False
+
+            Elm.Syntax.TypeAnnotation.GenericType _ ->
+                False
+
+            Elm.Syntax.TypeAnnotation.Tupled _ ->
+                False
+
+            Elm.Syntax.TypeAnnotation.Record _ ->
+                False
+
+            Elm.Syntax.TypeAnnotation.GenericRecord _ _ ->
+                False
+
+            Elm.Syntax.TypeAnnotation.Typed _ typeArguments ->
+                case typeArguments of
+                    [] ->
+                        False
+
+                    _ :: _ ->
+                        True
+
+            Elm.Syntax.TypeAnnotation.FunctionTypeAnnotation _ _ ->
+                True

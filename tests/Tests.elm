@@ -366,7 +366,6 @@ a =
                           )
                         ]
             )
-        , Test.todo "replace simple type with type construction → needs parens"
         , Test.test "upgrades to the new type name of a module-scope value declaration"
             (\() ->
                 """module A exposing (..)
@@ -514,7 +513,7 @@ a = a
                 """module A exposing (..)
 import Map
 
-a : Map.Mapping from to
+a : Bool -> Map.Mapping from to
 a = a
 """
                     |> Review.Test.run
@@ -544,7 +543,7 @@ a = a
                                 """module A exposing (..)
 import Map
 
-a : from -> to
+a : Bool -> (from -> to)
 a = a
 """
                         ]
