@@ -48,8 +48,39 @@ a = Util.findMap
 import List.Extra
 import MyUtil as Util
 
-a = (
-    List.Extra.findMap)
+a = List.Extra.findMap
+"""
+                        ]
+            )
+        , Test.test "upgrades deprecated function references without deleting their arguments"
+            (\() ->
+                """module A exposing (..)
+import List.Extra
+
+result =
+    [ 1, 2, 3 ]
+        |> List.Extra.filterNot isEven
+"""
+                    |> Review.Test.run
+                        (Upgrade.rule
+                            [ Upgrade.reference { old = ( "List.Extra", "filterNot" ), new = ( "List.Extra", "removeWhen" ) }
+                            ]
+                        )
+                    |> Review.Test.expectErrors
+                        [ Review.Test.error
+                            { message = "List.Extra.filterNot can be upgraded to List.Extra.removeWhen"
+                            , details =
+                                [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
+                                ]
+                            , under = "List.Extra.filterNot"
+                            }
+                            |> Review.Test.whenFixed
+                                """module A exposing (..)
+import List.Extra
+
+result =
+    [ 1, 2, 3 ]
+        |> List.Extra.removeWhen isEven
 """
                         ]
             )
@@ -152,6 +183,57 @@ a =
                 |> List.isEmpty) |>
     Expect.onFail
                                "list is filled")
+"""
+                        ]
+            )
+        , Test.test "uses lambda because arguments are missing, adds full qualification for exposed value used in the replacement because introduced argument has the same name"
+            (\() ->
+                """module A exposing (..)
+import Expect as Is
+import TestDescriptionFor exposing (actualBool)
+
+a =
+    Is.true actualBool
+"""
+                    |> Review.Test.run
+                        (Upgrade.rule
+                            [ Upgrade.application
+                                { oldName = ( "Expect", "true" )
+                                , oldArgumentNames = [ "onFalseDescription", "actualBool" ]
+                                , oldArgumentsToNew =
+                                    \oldArguments ->
+                                        case oldArguments of
+                                            [ onFalse, actual ] ->
+                                                Upgrade.call ( "Expect", "equal" )
+                                                    [ Elm.CodeGen.fqVal [ "Basics" ] "True", actual ]
+                                                    |> Upgrade.pipeInto ( "Expect", "onFail" ) [ onFalse ]
+                                                    |> Just
+
+                                            _ ->
+                                                Nothing
+                                }
+                            ]
+                        )
+                    |> Review.Test.expectErrors
+                        [ Review.Test.error
+                            { message = "Expect.true can be upgraded to Expect.equal, then Expect.onFail"
+                            , details =
+                                [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
+                                ]
+                            , under = "Is.true"
+                            }
+                            |> Review.Test.whenFixed
+                                """module A exposing (..)
+import Expect as Is
+import TestDescriptionFor exposing (actualBool)
+
+a =
+    (\\actualBool ->
+        Is.equal
+            True
+            actualBool_ |>
+        Is.onFail
+            TestDescriptionFor.actualBool)
 """
                         ]
             )
