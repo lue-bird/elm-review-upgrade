@@ -186,16 +186,22 @@ a =
 """
                         ]
             )
-        , Test.test "uses lambda because arguments are missing, adds full qualification for exposed value used in the replacement because introduced argument has the same name"
+        , Test.test "uses lambda because arguments are missing, adds _ to argument because introduced argument has the same name"
             (\() ->
-                """module A exposing (..)
+                [ """module A exposing (..)
 import Expect as Is
 import TestDescriptionFor exposing (actualBool)
 
 a =
     Is.true actualBool
 """
-                    |> Review.Test.run
+                , """module TestDescriptionFor exposing (actualBool)
+
+actualBool =
+    True
+"""
+                ]
+                    |> Review.Test.runOnModules
                         (Upgrade.rule
                             [ Upgrade.application
                                 { oldName = ( "Expect", "true" )
@@ -214,29 +220,34 @@ a =
                                 }
                             ]
                         )
-                    |> Review.Test.expectErrors
-                        [ Review.Test.error
-                            { message = "Expect.true can be upgraded to Expect.equal, then Expect.onFail"
-                            , details =
-                                [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
-                                ]
-                            , under = "Is.true"
-                            }
-                            |> Review.Test.whenFixed
-                                """module A exposing (..)
+                    |> Review.Test.expectErrorsForModules
+                        [ ( "A"
+                          , [ Review.Test.error
+                                { message = "Expect.true can be upgraded to Expect.equal, then Expect.onFail"
+                                , details =
+                                    [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
+                                    ]
+                                , under = "Is.true"
+                                }
+                                |> Review.Test.whenFixed
+                                    """module A exposing (..)
 import Expect as Is
 import TestDescriptionFor exposing (actualBool)
 
 a =
-    (\\actualBool ->
+    (\\actualBool_ ->
         Is.equal
             True
             actualBool_ |>
         Is.onFail
-            TestDescriptionFor.actualBool)
+            actualBool)
 """
+                            ]
+                          )
                         ]
             )
+        , Test.todo "keeps multiline-strings"
+        , Test.todo "replace simple type with type construction → needs parens"
         , Test.test "upgrades to the new type name of a module-scope value declaration"
             (\() ->
                 """module A exposing (..)

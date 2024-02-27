@@ -1,4 +1,4 @@
-module Qualification exposing (Context, defaultContext, inContext)
+module Qualification exposing (Context, defaultContext, inContext, isBindingInScope)
 
 import Dict
 import Imports exposing (Imports)

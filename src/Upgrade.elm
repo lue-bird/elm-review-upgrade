@@ -74,10 +74,6 @@ import Set exposing (Set)
 import Type.LocalExtra
 
 
-
--- upgrade
-
-
 {-| Describes a bunch of transformations to your code. To create one:
 
   - [`Upgrade.reference`](#reference), [`Upgrade.application`](#application)
@@ -397,7 +393,11 @@ rule upgrades =
             upgrade |> typeUpgradeReplacements
     in
     Review.Rule.newModuleRuleSchemaUsingContextCreator "Upgrade" initialContext
+        -- TODO convert to project rule, store all dependencies exposes,
+        -- store all imported project modules' exposes
+        -- |> usesContextFromImportedModules
         |> Review.Rule.providesFixesForModuleRule
+        -- TODO add import visitor that moves exposed members to moduleBindings
         |> Review.Rule.withCommentsVisitor
             (\comments context ->
                 case comments |> List.LocalExtra.firstJustMap (commentToModuleCommentRange context) of
@@ -982,20 +982,7 @@ upgradeSingleToApplicationReplacement =
                                                                 referenceOrApplicationInPipeline.name |> Qualification.inContext upgradeInfo |> qualifiedToString
 
                                                             argument0 :: arguments1Up ->
-                                                                let
-                                                                    qualificationContext : Qualification.Context {}
-                                                                    qualificationContext =
-                                                                        { imports = upgradeInfo.imports
-                                                                        , moduleBindings = upgradeInfo.moduleBindings
-                                                                        , localBindings =
-                                                                            upgradeInfo.localBindings
-                                                                                |> RangeDict.insert
-                                                                                    -- just any range that doesn't already exist is fine
-                                                                                    -- since Qualification.inContext does not look at the ranges
-                                                                                    ( Elm.Syntax.Range.empty, missingArgumentNames |> Set.fromList )
-                                                                        }
-                                                                in
-                                                                [ referenceOrApplicationInPipeline.name |> Qualification.inContext qualificationContext |> qualifiedToString
+                                                                [ referenceOrApplicationInPipeline.name |> Qualification.inContext upgradeInfo |> qualifiedToString
                                                                 , "\n"
                                                                 , (argument0 :: arguments1Up)
                                                                     |> List.map
@@ -1024,7 +1011,7 @@ upgradeSingleToApplicationReplacement =
 
                                                                                         Nothing ->
                                                                                             referenceOrApplicationInPipelineArgument
-                                                                                                |> Expression.LocalExtra.qualify qualificationContext
+                                                                                                |> Expression.LocalExtra.qualify upgradeInfo
                                                                                                 |> Elm.Pretty.prettyExpression
                                                                                                 |> Pretty.pretty 110
                                                                             in
@@ -1038,6 +1025,8 @@ upgradeSingleToApplicationReplacement =
                                                                     |> addIndentation 4
                                                                 ]
                                                                     |> String.concat
+                                                     -- TODO if old argument source has lines with non-space first character, mark them as multi-line string lines
+                                                     -- and in the final fix set their indentation to 0
                                                     )
                                                 |> String.join " |>\n"
                                         }
@@ -1115,10 +1104,7 @@ disambiguateFromBindingsInScope :
     }
     -> (String -> String)
 disambiguateFromBindingsInScope resources baseName =
-    if
-        (resources.moduleBindings |> Set.member baseName)
-            || (resources.localBindings |> RangeDict.any (\( _, bindings ) -> bindings |> Set.member baseName))
-    then
+    if baseName |> Qualification.isBindingInScope resources then
         disambiguateFromBindingsInScope resources (baseName ++ "_")
 
     else
