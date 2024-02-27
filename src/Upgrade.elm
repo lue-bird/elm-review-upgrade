@@ -1258,10 +1258,6 @@ disambiguateFromBindingsInScope resources baseName =
         disambiguateFromBindingsInScope resources (baseName ++ "_")
 
     else
-        let
-            _ =
-                Debug.log ("importExposedBindings do not contain " ++ baseName) resources.importExposedBindings
-        in
         baseName
 
 
