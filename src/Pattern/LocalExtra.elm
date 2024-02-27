@@ -1,4 +1,4 @@
-module Pattern.LocalExtra exposing (bindings, listBindings, nodeUsedModules, qualify, usedModules)
+module Pattern.LocalExtra exposing (bindings, listBindings, nodeReferences, qualify, references)
 
 import Elm.Syntax.Node exposing (Node(..))
 import Elm.Syntax.Pattern exposing (Pattern)
@@ -149,8 +149,8 @@ map patternChange =
                 Elm.Syntax.Pattern.NamedPattern qualified (arguments |> List.map step)
 
 
-usedModules : Pattern -> Set String
-usedModules =
+references : Pattern -> Set ( String, String )
+references =
     -- IGNORE TCO
     \pattern ->
         case pattern of
@@ -182,26 +182,26 @@ usedModules =
                 Set.empty
 
             Elm.Syntax.Pattern.ParenthesizedPattern inParens ->
-                inParens |> nodeUsedModules
+                inParens |> nodeReferences
 
             Elm.Syntax.Pattern.AsPattern aliased _ ->
-                aliased |> nodeUsedModules
+                aliased |> nodeReferences
 
             Elm.Syntax.Pattern.UnConsPattern head tail ->
-                Set.union (tail |> nodeUsedModules) (head |> nodeUsedModules)
+                Set.union (tail |> nodeReferences) (head |> nodeReferences)
 
             Elm.Syntax.Pattern.TuplePattern parts ->
-                parts |> List.LocalExtra.setUnionMap nodeUsedModules
+                parts |> List.LocalExtra.setUnionMap nodeReferences
 
             Elm.Syntax.Pattern.ListPattern elements ->
-                elements |> List.LocalExtra.setUnionMap nodeUsedModules
+                elements |> List.LocalExtra.setUnionMap nodeReferences
 
             Elm.Syntax.Pattern.NamedPattern fullyQualified arguments ->
                 arguments
-                    |> List.LocalExtra.setUnionMap nodeUsedModules
-                    |> Set.insert (fullyQualified.moduleName |> ModuleName.fromSyntax)
+                    |> List.LocalExtra.setUnionMap nodeReferences
+                    |> Set.insert ( fullyQualified.moduleName |> ModuleName.fromSyntax, fullyQualified.name )
 
 
-nodeUsedModules : Node Pattern -> Set String
-nodeUsedModules =
-    \(Node _ innerPattern) -> innerPattern |> usedModules
+nodeReferences : Node Pattern -> Set ( String, String )
+nodeReferences =
+    \(Node _ innerPattern) -> innerPattern |> references

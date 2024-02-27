@@ -434,6 +434,15 @@ map expressionChange =
 
 usedModules : Expression -> Set String
 usedModules =
+    \expression ->
+        expression
+            |> references
+            |> Set.map (\( moduleName, _ ) -> moduleName)
+            |> Set.remove ""
+
+
+references : Expression -> Set ( String, String )
+references =
     -- IGNORE TCO
     \expression ->
         Set.union
@@ -441,20 +450,21 @@ usedModules =
                 |> subs
                 |> List.LocalExtra.setUnionMap
                     (\(Node _ innerExpression) ->
-                        innerExpression |> usedModules
+                        innerExpression |> references
                     )
             )
             (case expression of
-                Elm.Syntax.Expression.FunctionOrValue qualification _ ->
-                    qualification |> ModuleName.fromSyntax |> Set.singleton
+                Elm.Syntax.Expression.FunctionOrValue qualification unqualifiedName ->
+                    ( qualification |> ModuleName.fromSyntax, unqualifiedName )
+                        |> Set.singleton
 
                 Elm.Syntax.Expression.LambdaExpression lambda ->
-                    lambda.args |> List.LocalExtra.setUnionMap Pattern.LocalExtra.nodeUsedModules
+                    lambda.args |> List.LocalExtra.setUnionMap Pattern.LocalExtra.nodeReferences
 
                 Elm.Syntax.Expression.CaseExpression caseOf ->
                     caseOf.cases
                         |> List.LocalExtra.setUnionMap
-                            (\( Node _ pattern, _ ) -> pattern |> Pattern.LocalExtra.usedModules)
+                            (\( Node _ pattern, _ ) -> pattern |> Pattern.LocalExtra.references)
 
                 Elm.Syntax.Expression.LetExpression letIn ->
                     letIn.declarations
@@ -462,7 +472,7 @@ usedModules =
                             (\(Node _ letDeclaration) ->
                                 case letDeclaration of
                                     Elm.Syntax.Expression.LetDestructuring (Node _ pattern) _ ->
-                                        pattern |> Pattern.LocalExtra.usedModules
+                                        pattern |> Pattern.LocalExtra.references
 
                                     Elm.Syntax.Expression.LetFunction letValueOrFunctionDeclaration ->
                                         Set.union
@@ -472,12 +482,12 @@ usedModules =
 
                                                 Just (Node _ signature) ->
                                                     signature.typeAnnotation
-                                                        |> Type.LocalExtra.nodeUsedModules
+                                                        |> Type.LocalExtra.nodeReferences
                                             )
                                             (letValueOrFunctionDeclaration.declaration
                                                 |> Elm.Syntax.Node.value
                                                 |> .arguments
-                                                |> List.LocalExtra.setUnionMap (\(Node _ pattern) -> pattern |> Pattern.LocalExtra.usedModules)
+                                                |> List.LocalExtra.setUnionMap (\(Node _ pattern) -> pattern |> Pattern.LocalExtra.references)
                                             )
                             )
 

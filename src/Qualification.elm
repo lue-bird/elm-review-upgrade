@@ -64,5 +64,7 @@ isBindingInScope :
     -> String
     -> Bool
 isBindingInScope resources binding =
-    Set.member binding resources.moduleBindings
-        || RangeDict.any (\( _, bindings ) -> Set.member binding bindings) resources.localBindings
+    (resources.moduleBindings |> Set.member binding)
+        || (resources.localBindings
+                |> RangeDict.any (\( _, bindings ) -> bindings |> Set.member binding)
+           )

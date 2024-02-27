@@ -484,7 +484,6 @@ modulesToImportsString : Set String -> String
 modulesToImportsString =
     \modulesToImport ->
         modulesToImport
-            |> Set.remove ""
             |> Set.toList
             |> List.concatMap (\moduleName -> [ "import ", moduleName, "\n" ])
             |> String.concat
@@ -811,13 +810,18 @@ applicationUpgradePerform upgrade context =
                         let
                             range : Range
                             range =
-                                case List.drop (upgradeForName.oldArgumentCount - 1) referenceOrApplication.arguments of
-                                    lastExpectedArg :: _ :: _ ->
-                                        -- extra arguments so we'll update the range to drop the extra ones
-                                        { start = referenceOrApplication.referenceRange.start, end = (Elm.Syntax.Node.range lastExpectedArg).end }
+                                case upgradeForName.oldArgumentCount of
+                                    0 ->
+                                        referenceOrApplication.referenceRange
 
-                                    _ ->
-                                        referenceOrApplication.range
+                                    oldArgumentCountAtLeast1 ->
+                                        case List.drop (oldArgumentCountAtLeast1 - 1) referenceOrApplication.arguments of
+                                            lastExpectedArg :: _ :: _ ->
+                                                -- extra arguments so we'll update the range to drop the extra ones
+                                                { start = referenceOrApplication.referenceRange.start, end = (Elm.Syntax.Node.range lastExpectedArg).end }
+
+                                            _ ->
+                                                referenceOrApplication.range
 
                             arguments : List (Node Expression)
                             arguments =
@@ -972,7 +976,20 @@ upgradeSingleToApplicationReplacement =
                                                             referenceOrApplicationInPipeline.name |> Qualification.inContext upgradeInfo |> qualifiedToString
 
                                                         argument0 :: arguments1Up ->
-                                                            [ referenceOrApplicationInPipeline.name |> Qualification.inContext upgradeInfo |> qualifiedToString
+                                                            let
+                                                                qualificationContext : Qualification.Context {}
+                                                                qualificationContext =
+                                                                    { imports = upgradeInfo.imports
+                                                                    , moduleBindings = upgradeInfo.moduleBindings
+                                                                    , localBindings =
+                                                                        upgradeInfo.localBindings
+                                                                            |> RangeDict.insert
+                                                                                -- just any range that doesn't already exist is fine
+                                                                                -- since Qualification.inContext does not look at the ranges
+                                                                                ( Elm.Syntax.Range.empty, missingArgumentNames |> Set.fromList )
+                                                                    }
+                                                            in
+                                                            [ referenceOrApplicationInPipeline.name |> Qualification.inContext qualificationContext |> qualifiedToString
                                                             , "\n"
                                                             , (argument0 :: arguments1Up)
                                                                 |> List.map
@@ -1001,7 +1018,7 @@ upgradeSingleToApplicationReplacement =
 
                                                                                     Nothing ->
                                                                                         referenceOrApplicationInPipelineArgument
-                                                                                            |> Expression.LocalExtra.qualify upgradeInfo
+                                                                                            |> Expression.LocalExtra.qualify qualificationContext
                                                                                             |> Elm.Pretty.prettyExpression
                                                                                             |> Pretty.pretty 110
                                                                         in
