@@ -964,84 +964,86 @@ upgradeSingleToApplicationReplacement =
                                                     |> List.map (\r -> r.name |> Tuple.first)
                                                     |> Set.fromList
                                                 )
-
-                                    returnedString : String
-                                    returnedString =
-                                        newPipeline
-                                            |> ListFilled.toList
-                                            |> List.map
-                                                (\referenceOrApplicationInPipeline ->
-                                                    case referenceOrApplicationInPipeline.arguments of
-                                                        [] ->
-                                                            referenceOrApplicationInPipeline.name |> Qualification.inContext upgradeInfo |> qualifiedToString
-
-                                                        argument0 :: arguments1Up ->
-                                                            let
-                                                                qualificationContext : Qualification.Context {}
-                                                                qualificationContext =
-                                                                    { imports = upgradeInfo.imports
-                                                                    , moduleBindings = upgradeInfo.moduleBindings
-                                                                    , localBindings =
-                                                                        upgradeInfo.localBindings
-                                                                            |> RangeDict.insert
-                                                                                -- just any range that doesn't already exist is fine
-                                                                                -- since Qualification.inContext does not look at the ranges
-                                                                                ( Elm.Syntax.Range.empty, missingArgumentNames |> Set.fromList )
-                                                                    }
-                                                            in
-                                                            [ referenceOrApplicationInPipeline.name |> Qualification.inContext qualificationContext |> qualifiedToString
-                                                            , "\n"
-                                                            , (argument0 :: arguments1Up)
-                                                                |> List.map
-                                                                    (\referenceOrApplicationInPipelineArgument ->
-                                                                        let
-                                                                            comesFromOld : Maybe Range
-                                                                            comesFromOld =
-                                                                                upgradeInfo.arguments
-                                                                                    |> List.LocalExtra.firstJustMap
-                                                                                        (\(Node oldArgumentRange oldArgumentExpression) ->
-                                                                                            if oldArgumentExpression == referenceOrApplicationInPipelineArgument then
-                                                                                                Just oldArgumentRange
-
-                                                                                            else
-                                                                                                Nothing
-                                                                                        )
-
-                                                                            newArgumentString : String
-                                                                            newArgumentString =
-                                                                                case comesFromOld of
-                                                                                    Just oldArgumentRange ->
-                                                                                        (String.repeat (oldArgumentRange.start.column - 1) " "
-                                                                                            ++ upgradeInfo.extractSourceCode oldArgumentRange
-                                                                                        )
-                                                                                            |> removeIndentation
-
-                                                                                    Nothing ->
-                                                                                        referenceOrApplicationInPipelineArgument
-                                                                                            |> Expression.LocalExtra.qualify qualificationContext
-                                                                                            |> Elm.Pretty.prettyExpression
-                                                                                            |> Pretty.pretty 110
-                                                                        in
-                                                                        if referenceOrApplicationInPipelineArgument |> Expression.LocalExtra.needsParens then
-                                                                            [ "(\n", newArgumentString, ")" ] |> String.concat
-
-                                                                        else
-                                                                            newArgumentString
-                                                                    )
-                                                                |> String.join "\n"
-                                                                |> addIndentation 4
-                                                            ]
-                                                                |> String.concat
-                                                )
-                                            |> String.join " |>\n"
                                 in
                                 { replacement =
-                                    { argumentNames = missingArgumentNames
-                                    , returnedString = returnedString
-                                    }
-                                        |> toLambdaOrParenthesizedStringWithArgumentsMultiline
-                                        |> String.split "\n"
-                                        |> String.join ("\n" ++ String.repeat (upgradeInfo.range.start.column - 1) " ")
+                                    if (newPipeline |> ListFilled.tail |> List.isEmpty) && (newPipeline |> ListFilled.head |> .arguments |> List.isEmpty) then
+                                        -- since we just replace it with a simple reference, there's no need for extra parens
+                                        newPipeline |> ListFilled.head |> .name |> Qualification.inContext upgradeInfo |> qualifiedToString
+
+                                    else
+                                        { argumentNames = missingArgumentNames
+                                        , returnedString =
+                                            newPipeline
+                                                |> ListFilled.toList
+                                                |> List.map
+                                                    (\referenceOrApplicationInPipeline ->
+                                                        case referenceOrApplicationInPipeline.arguments of
+                                                            [] ->
+                                                                referenceOrApplicationInPipeline.name |> Qualification.inContext upgradeInfo |> qualifiedToString
+
+                                                            argument0 :: arguments1Up ->
+                                                                let
+                                                                    qualificationContext : Qualification.Context {}
+                                                                    qualificationContext =
+                                                                        { imports = upgradeInfo.imports
+                                                                        , moduleBindings = upgradeInfo.moduleBindings
+                                                                        , localBindings =
+                                                                            upgradeInfo.localBindings
+                                                                                |> RangeDict.insert
+                                                                                    -- just any range that doesn't already exist is fine
+                                                                                    -- since Qualification.inContext does not look at the ranges
+                                                                                    ( Elm.Syntax.Range.empty, missingArgumentNames |> Set.fromList )
+                                                                        }
+                                                                in
+                                                                [ referenceOrApplicationInPipeline.name |> Qualification.inContext qualificationContext |> qualifiedToString
+                                                                , "\n"
+                                                                , (argument0 :: arguments1Up)
+                                                                    |> List.map
+                                                                        (\referenceOrApplicationInPipelineArgument ->
+                                                                            let
+                                                                                comesFromOld : Maybe Range
+                                                                                comesFromOld =
+                                                                                    upgradeInfo.arguments
+                                                                                        |> List.LocalExtra.firstJustMap
+                                                                                            (\(Node oldArgumentRange oldArgumentExpression) ->
+                                                                                                if oldArgumentExpression == referenceOrApplicationInPipelineArgument then
+                                                                                                    Just oldArgumentRange
+
+                                                                                                else
+                                                                                                    Nothing
+                                                                                            )
+
+                                                                                newArgumentString : String
+                                                                                newArgumentString =
+                                                                                    case comesFromOld of
+                                                                                        Just oldArgumentRange ->
+                                                                                            (String.repeat (oldArgumentRange.start.column - 1) " "
+                                                                                                ++ upgradeInfo.extractSourceCode oldArgumentRange
+                                                                                            )
+                                                                                                |> removeIndentation
+
+                                                                                        Nothing ->
+                                                                                            referenceOrApplicationInPipelineArgument
+                                                                                                |> Expression.LocalExtra.qualify qualificationContext
+                                                                                                |> Elm.Pretty.prettyExpression
+                                                                                                |> Pretty.pretty 110
+                                                                            in
+                                                                            if referenceOrApplicationInPipelineArgument |> Expression.LocalExtra.needsParens then
+                                                                                [ "(\n", newArgumentString, ")" ] |> String.concat
+
+                                                                            else
+                                                                                newArgumentString
+                                                                        )
+                                                                    |> String.join "\n"
+                                                                    |> addIndentation 4
+                                                                ]
+                                                                    |> String.concat
+                                                    )
+                                                |> String.join " |>\n"
+                                        }
+                                            |> toLambdaOrParenthesizedStringWithArgumentsMultiline
+                                            |> String.split "\n"
+                                            |> String.join ("\n" ++ String.repeat (upgradeInfo.range.start.column - 1) " ")
                                 , replacementDescription =
                                     newPipeline
                                         |> ListFilled.toList

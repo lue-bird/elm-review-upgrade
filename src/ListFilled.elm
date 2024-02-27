@@ -1,4 +1,4 @@
-module ListFilled exposing (ListFilled, attach, toList)
+module ListFilled exposing (ListFilled, attach, head, tail, toList)
 
 
 type alias ListFilled element =
@@ -6,13 +6,13 @@ type alias ListFilled element =
 
 
 head : ListFilled a -> a
-head ( head_, _ ) =
-    head_
+head =
+    \( head_, _ ) -> head_
 
 
 tail : ListFilled a -> List a
-tail ( _, tail_ ) =
-    tail_
+tail =
+    \( _, tail_ ) -> tail_
 
 
 attach : List a -> (ListFilled a -> ListFilled a)
