@@ -51,9 +51,14 @@ module Upgrade exposing
 import Declaration.LocalExtra
 import Dict exposing (Dict)
 import Elm.CodeGen
+import Elm.Docs
 import Elm.Pretty
 import Elm.Syntax.Declaration exposing (Declaration)
+import Elm.Syntax.Exposing
 import Elm.Syntax.Expression exposing (Expression)
+import Elm.Syntax.Import
+import Elm.Syntax.Module
+import Elm.Syntax.ModuleName
 import Elm.Syntax.Node exposing (Node(..))
 import Elm.Syntax.Range exposing (Range)
 import Elm.Syntax.TypeAnnotation
@@ -68,6 +73,7 @@ import Qualification
 import RangeDict exposing (RangeDict)
 import Review.Fix
 import Review.ModuleNameLookupTable exposing (ModuleNameLookupTable)
+import Review.Project.Dependency
 import Review.Rule exposing (Error, Rule)
 import Rope exposing (Rope)
 import Set exposing (Set)
@@ -324,15 +330,22 @@ batch =
     \upgradeList -> upgradeList |> Rope.fromList |> Rope.concat
 
 
+type alias ProjectContext =
+    { moduleExposes : Dict Elm.Syntax.ModuleName.ModuleName (Set String) }
+
+
 type alias ModuleContext =
     { lookupTable : ModuleNameLookupTable
     , moduleName : String
+    , exposed : Imports.Exposed
+    , importExposedBindings : Set String
     , moduleBindings : Set String
     , localBindings : RangeDict (Set String)
     , branchLocalBindings : RangeDict (Set String)
     , rangesToIgnore : RangeDict ()
     , extractSourceCode : Range -> String
     , imports : Imports
+    , importedModuleExposes : Dict Elm.Syntax.ModuleName.ModuleName (Set String)
     , importRow : Int
     }
 
@@ -341,6 +354,7 @@ type alias ApplicationUpgradeResources =
     { lookupTable : ModuleNameLookupTable
     , imports : Imports
     , extractSourceCode : Range -> String
+    , importExposedBindings : Set String
     , moduleBindings : Set String
     , localBindings : RangeDict (Set String)
     , range : Range
@@ -352,6 +366,7 @@ type alias ApplicationUpgradeResources =
 type alias TypeUpgradeResources =
     { lookupTable : ModuleNameLookupTable
     , imports : Imports
+    , importExposedBindings : Set String
     , moduleBindings : Set String
     , localBindings : RangeDict (Set String)
     , arguments : List (Node Elm.Syntax.TypeAnnotation.TypeAnnotation)
@@ -392,39 +407,162 @@ rule upgrades =
         typeUpgradeByOldName =
             upgrade |> typeUpgradeReplacements
     in
-    Review.Rule.newModuleRuleSchemaUsingContextCreator "Upgrade" initialContext
-        -- TODO convert to project rule, store all dependencies exposes,
-        -- store all imported project modules' exposes
-        -- |> usesContextFromImportedModules
-        |> Review.Rule.providesFixesForModuleRule
-        -- TODO add import visitor that moves exposed members to moduleBindings
-        |> Review.Rule.withCommentsVisitor
-            (\comments context ->
-                case comments |> List.LocalExtra.firstJustMap (commentToModuleCommentRange context) of
-                    Just moduleCommentRange ->
-                        ( []
-                        , { context | importRow = moduleCommentRange.end.row + 1 }
+    Review.Rule.newProjectRuleSchema "Upgrade" { moduleExposes = Dict.empty }
+        |> Review.Rule.withDirectDependenciesProjectVisitor
+            (\dependencyDocsDict context ->
+                ( []
+                , { context
+                    | moduleExposes =
+                        Dict.union context.moduleExposes
+                            (dependencyDocsDict
+                                |> Dict.values
+                                |> List.concatMap (\dependencyDocs -> dependencyDocs |> Review.Project.Dependency.modules)
+                                |> List.map (\moduleDocs -> ( moduleDocs.name |> String.split ".", moduleDocs |> moduleDocsExposes ))
+                                |> Dict.fromList
+                            )
+                  }
+                )
+            )
+        |> Review.Rule.providesFixesForProjectRule
+        |> Review.Rule.withContextFromImportedModules
+        |> Review.Rule.withModuleVisitor
+            (\moduleSchema ->
+                moduleSchema
+                    |> Review.Rule.withImportVisitor
+                        (\(Node _ import_) context ->
+                            ( []
+                            , { context
+                                | importExposedBindings =
+                                    Set.union context.importExposedBindings
+                                        (import_ |> importExposes context)
+                              }
+                            )
                         )
+                    |> Review.Rule.withCommentsVisitor
+                        (\comments context ->
+                            case comments |> List.LocalExtra.firstJustMap (commentToModuleCommentRange context) of
+                                Just moduleCommentRange ->
+                                    ( []
+                                    , { context | importRow = moduleCommentRange.end.row + 1 }
+                                    )
 
-                    Nothing ->
-                        ( [], context )
+                                Nothing ->
+                                    ( [], context )
+                        )
+                    |> Review.Rule.withDeclarationListVisitor
+                        (\declarationList context -> ( [], declarationListVisitor declarationList context ))
+                    |> Review.Rule.withDeclarationEnterVisitor
+                        (\(Node _ declaration) context -> declarationVisitor declaration typeUpgradeByOldName context)
+                    |> Review.Rule.withExpressionEnterVisitor
+                        (\expressionNode context ->
+                            expressionNode
+                                |> expressionVisitor
+                                    { application = applicationUpgradeReplacementsByOldName
+                                    , type_ = typeUpgradeByOldName
+                                    }
+                                    context
+                        )
+                    |> Review.Rule.withExpressionExitVisitor
+                        (\node context -> ( [], expressionExitVisitor node context ))
             )
-        |> Review.Rule.withDeclarationListVisitor
-            (\declarationList context -> ( [], declarationListVisitor declarationList context ))
-        |> Review.Rule.withDeclarationEnterVisitor
-            (\(Node _ declaration) context -> declarationVisitor declaration typeUpgradeByOldName context)
-        |> Review.Rule.withExpressionEnterVisitor
-            (\expressionNode context ->
-                expressionNode
-                    |> expressionVisitor
-                        { application = applicationUpgradeReplacementsByOldName
-                        , type_ = typeUpgradeByOldName
-                        }
-                        context
-            )
-        |> Review.Rule.withExpressionExitVisitor
-            (\node context -> ( [], expressionExitVisitor node context ))
-        |> Review.Rule.fromModuleRuleSchema
+        |> Review.Rule.withModuleContextUsingContextCreator
+            { fromProjectToModule = projectToModuleContextCreator
+            , fromModuleToProject = moduleToProjectContextCreator
+            , foldProjectContexts = foldProjectContexts
+            }
+        |> Review.Rule.fromProjectRuleSchema
+
+
+foldProjectContexts : ProjectContext -> ProjectContext -> ProjectContext
+foldProjectContexts a b =
+    { moduleExposes = Dict.union a.moduleExposes b.moduleExposes }
+
+
+projectToModuleContextCreator : Review.Rule.ContextCreator ProjectContext ModuleContext
+projectToModuleContextCreator =
+    Review.Rule.initContextCreator
+        (\lookupTable moduleName extractSourceCode fullAst projectContext ->
+            { lookupTable = lookupTable
+            , moduleName = moduleName |> ModuleName.fromSyntax
+            , exposed = fullAst.moduleDefinition |> Elm.Syntax.Node.value |> moduleHeaderExposed
+            , imports =
+                Imports.implicit |> Imports.insertSyntaxImports fullAst.imports
+            , importedModuleExposes = projectContext.moduleExposes
+            , importExposedBindings = Set.empty
+            , moduleBindings = Set.empty
+            , localBindings = RangeDict.empty
+            , branchLocalBindings = RangeDict.empty
+            , rangesToIgnore = RangeDict.empty
+            , extractSourceCode = extractSourceCode
+            , importRow = 2
+            }
+        )
+        |> Review.Rule.withModuleNameLookupTable
+        |> Review.Rule.withModuleName
+        |> Review.Rule.withSourceCodeExtractor
+        |> Review.Rule.withFullAst
+
+
+moduleHeaderExposed : Elm.Syntax.Module.Module -> Imports.Exposed
+moduleHeaderExposed =
+    \moduleHeader ->
+        case moduleHeader of
+            Elm.Syntax.Module.NormalModule defaultModuleHeaderData ->
+                defaultModuleHeaderData.exposingList |> Elm.Syntax.Node.value |> syntaxExposingToExposed
+
+            Elm.Syntax.Module.PortModule defaultModuleHeaderData ->
+                defaultModuleHeaderData.exposingList |> Elm.Syntax.Node.value |> syntaxExposingToExposed
+
+            Elm.Syntax.Module.EffectModule effectModuleHeaderData ->
+                effectModuleHeaderData.exposingList |> Elm.Syntax.Node.value |> syntaxExposingToExposed
+
+
+exposeName : Elm.Syntax.Exposing.TopLevelExpose -> String
+exposeName topLevelExpose =
+    case topLevelExpose of
+        Elm.Syntax.Exposing.FunctionExpose name ->
+            name
+
+        Elm.Syntax.Exposing.TypeOrAliasExpose name ->
+            name
+
+        Elm.Syntax.Exposing.InfixExpose name ->
+            name
+
+        Elm.Syntax.Exposing.TypeExpose typeExpose ->
+            typeExpose.name
+
+
+syntaxExposingToExposed : Elm.Syntax.Exposing.Exposing -> Imports.Exposed
+syntaxExposingToExposed =
+    \exposing_ ->
+        case exposing_ of
+            Elm.Syntax.Exposing.Explicit list ->
+                list
+                    |> List.map (\(Node _ expose) -> expose |> exposeName)
+                    |> Set.fromList
+                    |> Imports.ExposedSome
+
+            Elm.Syntax.Exposing.All _ ->
+                Imports.ExposedAll
+
+
+moduleToProjectContextCreator : Review.Rule.ContextCreator ModuleContext ProjectContext
+moduleToProjectContextCreator =
+    Review.Rule.initContextCreator
+        (\moduleName moduleContext ->
+            { moduleExposes =
+                Dict.singleton moduleName
+                    (case moduleContext.exposed of
+                        Imports.ExposedAll ->
+                            moduleContext.moduleBindings
+
+                        Imports.ExposedSome explicitExposes ->
+                            explicitExposes
+                    )
+            }
+        )
+        |> Review.Rule.withModuleName
 
 
 commentToModuleCommentRange : { resources_ | extractSourceCode : Range -> String } -> (Node String -> Maybe Range)
@@ -447,30 +585,39 @@ commentToModuleCommentRange resources =
             Nothing
 
 
-initialContext : Review.Rule.ContextCreator () ModuleContext
-initialContext =
-    Review.Rule.initContextCreator
-        (\lookupTable moduleName extractSourceCode fullAst () ->
-            { lookupTable = lookupTable
-            , moduleName = moduleName |> ModuleName.fromSyntax
-            , imports =
-                Imports.implicit |> Imports.insertSyntaxImports fullAst.imports
-            , moduleBindings = Set.empty
-            , localBindings = RangeDict.empty
-            , branchLocalBindings = RangeDict.empty
-            , rangesToIgnore = RangeDict.empty
-            , extractSourceCode = extractSourceCode
-            , importRow = 2
-            }
-        )
-        |> Review.Rule.withModuleNameLookupTable
-        |> Review.Rule.withModuleName
-        |> Review.Rule.withSourceCodeExtractor
-        |> Review.Rule.withFullAst
+moduleDocsExposes : Elm.Docs.Module -> Set String
+moduleDocsExposes =
+    \moduleDocs ->
+        [ moduleDocs.unions |> List.map .name
+        , moduleDocs.aliases |> List.map .name
+        , moduleDocs.values |> List.map .name
+        ]
+            |> List.concat
+            |> Set.fromList
 
 
+importExposes :
+    { context_ | importedModuleExposes : Dict Elm.Syntax.ModuleName.ModuleName (Set String) }
+    -> (Elm.Syntax.Import.Import -> Set String)
+importExposes context =
+    \import_ ->
+        case import_.exposingList of
+            Nothing ->
+                Set.empty
 
--- EXPRESSION VISITOR
+            Just (Node _ exposing_) ->
+                case exposing_ of
+                    Elm.Syntax.Exposing.Explicit list ->
+                        list |> List.map (\(Node _ expose) -> expose |> exposeName) |> Set.fromList
+
+                    Elm.Syntax.Exposing.All _ ->
+                        case context.importedModuleExposes |> Dict.get (import_.moduleName |> Elm.Syntax.Node.value) of
+                            Just itsImportExposes ->
+                                itsImportExposes
+
+                            -- should not happen
+                            Nothing ->
+                                Set.empty
 
 
 declarationListVisitor : List (Node Declaration) -> ModuleContext -> ModuleContext
@@ -543,6 +690,7 @@ typeUpgradePerform upgradeByOldName context =
                                     maybeUpgraded =
                                         upgradeToPerform
                                             { lookupTable = context.lookupTable
+                                            , importExposedBindings = context.importExposedBindings
                                             , moduleBindings = context.moduleBindings
                                             , localBindings = context.localBindings
                                             , imports = context.imports
@@ -833,6 +981,7 @@ applicationUpgradePerform upgrade context =
                                 { lookupTable = context.lookupTable
                                 , extractSourceCode = context.extractSourceCode
                                 , imports = context.imports
+                                , importExposedBindings = context.importExposedBindings
                                 , moduleBindings = context.moduleBindings
                                 , localBindings = context.localBindings
                                 , range = range
@@ -1099,7 +1248,8 @@ lineIndentation =
 
 disambiguateFromBindingsInScope :
     { resources_
-        | moduleBindings : Set String
+        | importExposedBindings : Set String
+        , moduleBindings : Set String
         , localBindings : RangeDict (Set String)
     }
     -> (String -> String)
@@ -1108,6 +1258,10 @@ disambiguateFromBindingsInScope resources baseName =
         disambiguateFromBindingsInScope resources (baseName ++ "_")
 
     else
+        let
+            _ =
+                Debug.log ("importExposedBindings do not contain " ++ baseName) resources.importExposedBindings
+        in
         baseName
 
 

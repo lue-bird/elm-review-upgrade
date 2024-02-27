@@ -9,6 +9,7 @@ import Set exposing (Set)
 defaultContext : Context {}
 defaultContext =
     { imports = Imports.implicit
+    , importExposedBindings = Set.empty
     , localBindings = RangeDict.empty
     , moduleBindings = Set.empty
     }
@@ -17,6 +18,7 @@ defaultContext =
 type alias Context a =
     { a
         | imports : Imports
+        , importExposedBindings : Set String
         , moduleBindings : Set String
         , localBindings : RangeDict (Set String)
     }
@@ -58,13 +60,15 @@ inContext qualifyResources =
 
 isBindingInScope :
     { resources_
-        | moduleBindings : Set String
+        | importExposedBindings : Set String
+        , moduleBindings : Set String
         , localBindings : RangeDict (Set String)
     }
     -> String
     -> Bool
 isBindingInScope resources binding =
-    (resources.moduleBindings |> Set.member binding)
+    (resources.importExposedBindings |> Set.member binding)
+        || (resources.moduleBindings |> Set.member binding)
         || (resources.localBindings
                 |> RangeDict.any (\( _, bindings ) -> bindings |> Set.member binding)
            )

@@ -238,7 +238,7 @@ a =
     (\\actualBool_ ->
         Is.equal
             True
-                        actualBool_ |>
+            actualBool_ |>
         Is.onFail
                         actualBool)
 """
