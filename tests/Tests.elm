@@ -186,7 +186,7 @@ a =
 """
                         ]
             )
-        , Test.test "uses lambda because arguments are missing, adds _ to argument because introduced argument has the same name"
+        , Test.test "uses lambda because arguments are missing, adds _ to argument because introduced argument has the same name as expose from import"
             (\() ->
                 [ """module A exposing (..)
 import Expect as Is
@@ -238,14 +238,16 @@ a =
     (\\actualBool_ ->
         Is.equal
             True
-            actualBool_ |>
+                        actualBool_ |>
         Is.onFail
-            actualBool)
+                        actualBool)
 """
                             ]
                           )
                         ]
             )
+        , Test.todo "same test for import exposing (..)"
+        , Test.todo "same test for import exposing (..) and the imported module itself exposing (..)"
         , Test.todo "keeps multiline-strings"
         , Test.todo "replace simple type with type construction → needs parens"
         , Test.test "upgrades to the new type name of a module-scope value declaration"
