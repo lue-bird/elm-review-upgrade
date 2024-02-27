@@ -186,7 +186,7 @@ a =
 """
                         ]
             )
-        , Test.test "uses lambda because arguments are missing, adds _ to argument because introduced argument has the same name as expose from import"
+        , Test.test "uses lambda because arguments are missing, adds _ to argument because introduced argument has the same name as explicit expose from import"
             (\() ->
                 [ """module A exposing (..)
 import Expect as Is
@@ -246,8 +246,126 @@ a =
                           )
                         ]
             )
-        , Test.todo "same test for import exposing (..)"
-        , Test.todo "same test for import exposing (..) and the imported module itself exposing (..)"
+        , Test.test "uses lambda because arguments are missing, adds _ to argument because introduced argument has the same name as expose from import exposing (..)"
+            (\() ->
+                [ """module A exposing (..)
+import Expect as Is
+import TestDescriptionFor exposing (..)
+
+a =
+    Is.true actualBool
+"""
+                , """module TestDescriptionFor exposing (actualBool)
+
+actualBool =
+    True
+"""
+                ]
+                    |> Review.Test.runOnModules
+                        (Upgrade.rule
+                            [ Upgrade.application
+                                { oldName = ( "Expect", "true" )
+                                , oldArgumentNames = [ "onFalseDescription", "actualBool" ]
+                                , oldArgumentsToNew =
+                                    \oldArguments ->
+                                        case oldArguments of
+                                            [ onFalse, actual ] ->
+                                                Upgrade.call ( "Expect", "equal" )
+                                                    [ Elm.CodeGen.fqVal [ "Basics" ] "True", actual ]
+                                                    |> Upgrade.pipeInto ( "Expect", "onFail" ) [ onFalse ]
+                                                    |> Just
+
+                                            _ ->
+                                                Nothing
+                                }
+                            ]
+                        )
+                    |> Review.Test.expectErrorsForModules
+                        [ ( "A"
+                          , [ Review.Test.error
+                                { message = "Expect.true can be upgraded to Expect.equal, then Expect.onFail"
+                                , details =
+                                    [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
+                                    ]
+                                , under = "Is.true"
+                                }
+                                |> Review.Test.whenFixed
+                                    """module A exposing (..)
+import Expect as Is
+import TestDescriptionFor exposing (..)
+
+a =
+    (\\actualBool_ ->
+        Is.equal
+            True
+            actualBool_ |>
+        Is.onFail
+                        actualBool)
+"""
+                            ]
+                          )
+                        ]
+            )
+        , Test.test "uses lambda because arguments are missing, adds _ to argument because introduced argument has the same name as expose from import exposing (..) and that module also exposing (..)"
+            (\() ->
+                [ """module A exposing (..)
+import Expect as Is
+import TestDescriptionFor exposing (..)
+
+a =
+    Is.true actualBool
+"""
+                , """module TestDescriptionFor exposing (..)
+
+actualBool =
+    True
+"""
+                ]
+                    |> Review.Test.runOnModules
+                        (Upgrade.rule
+                            [ Upgrade.application
+                                { oldName = ( "Expect", "true" )
+                                , oldArgumentNames = [ "onFalseDescription", "actualBool" ]
+                                , oldArgumentsToNew =
+                                    \oldArguments ->
+                                        case oldArguments of
+                                            [ onFalse, actual ] ->
+                                                Upgrade.call ( "Expect", "equal" )
+                                                    [ Elm.CodeGen.fqVal [ "Basics" ] "True", actual ]
+                                                    |> Upgrade.pipeInto ( "Expect", "onFail" ) [ onFalse ]
+                                                    |> Just
+
+                                            _ ->
+                                                Nothing
+                                }
+                            ]
+                        )
+                    |> Review.Test.expectErrorsForModules
+                        [ ( "A"
+                          , [ Review.Test.error
+                                { message = "Expect.true can be upgraded to Expect.equal, then Expect.onFail"
+                                , details =
+                                    [ "I suggest applying the automatic fix, then cleaning it up in a way you like."
+                                    ]
+                                , under = "Is.true"
+                                }
+                                |> Review.Test.whenFixed
+                                    """module A exposing (..)
+import Expect as Is
+import TestDescriptionFor exposing (..)
+
+a =
+    (\\actualBool_ ->
+        Is.equal
+            True
+            actualBool_ |>
+        Is.onFail
+                        actualBool)
+"""
+                            ]
+                          )
+                        ]
+            )
         , Test.todo "keeps multiline-strings"
         , Test.todo "replace simple type with type construction → needs parens"
         , Test.test "upgrades to the new type name of a module-scope value declaration"
