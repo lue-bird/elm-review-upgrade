@@ -366,7 +366,6 @@ a =
                           )
                         ]
             )
-        , Test.todo "keeps multiline-strings"
         , Test.todo "replace simple type with type construction → needs parens"
         , Test.test "upgrades to the new type name of a module-scope value declaration"
             (\() ->

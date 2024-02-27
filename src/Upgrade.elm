@@ -1174,8 +1174,6 @@ upgradeSingleToApplicationReplacement =
                                                                     |> addIndentation 4
                                                                 ]
                                                                     |> String.concat
-                                                     -- TODO if old argument source has lines with non-space first character, mark them as multi-line string lines
-                                                     -- and in the final fix set their indentation to 0
                                                     )
                                                 |> String.join " |>\n"
                                         }
